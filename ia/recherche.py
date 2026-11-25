@@ -79,8 +79,11 @@ def decouper_criteres(messages: list, demander_ia) -> tuple:
         else:
             valeur = None
         nom = str(c["critere"]).strip()
-        if normaliser(nom).replace(" ", "_") in TYPES or len(nom) < 3:
-            nom = nom_lisible(type_critere, valeur) or nom      # l'IA a recopié le nom du type
+        # Expérience et âge : toujours un nom précis (« Au moins 2 ans d'expérience ») ;
+        # lieu : le nom de l'IA, sauf si elle a recopié le nom du type
+        if type_critere in ("experience_min", "age_min", "age_max") \
+                or normaliser(nom).replace(" ", "_") in TYPES or len(nom) < 3:
+            nom = nom_lisible(type_critere, valeur) or nom
         criteres.append({"critere": nom, "type": type_critere, "valeur": valeur})
     return criteres, str(reponse.get("message") or "").strip()
 
@@ -88,7 +91,7 @@ def decouper_criteres(messages: list, demander_ia) -> tuple:
 def nom_lisible(type_critere: str, valeur) -> str | None:
     """Un nom de critère en français courant, pour les critères calculés."""
     if type_critere == "experience_min":
-        return f"Au moins {_nombre(valeur)} an(s) d'expérience"
+        return f"Au moins {_ans(valeur)} d'expérience"
     if type_critere == "age_min":
         return f"Au moins {_nombre(valeur)} ans"
     if type_critere == "age_max":
@@ -113,6 +116,23 @@ def _nombre(n: float) -> str:
     return f"{n:g}".replace(".", ",")
 
 
+def _ans(n: float) -> str:
+    """« 1 an », « 2 ans », « 1,5 an »."""
+    return f"{_nombre(n)} an" + ("s" if n >= 2 else "")
+
+
+def duree_lisible(annees) -> str:
+    """Une durée en années → « 4 mois », « 1 an », « 3 ans et 2 mois » (jamais « 0,3 an »)."""
+    mois_total = round(float(annees) * 12)
+    ans, mois = divmod(mois_total, 12)
+    morceaux = []
+    if ans:
+        morceaux.append(f"{ans} an" + ("s" if ans > 1 else ""))
+    if mois or not ans:
+        morceaux.append(f"{mois} mois")
+    return " et ".join(morceaux)
+
+
 def verifier_par_calcul(critere: dict, candidat: dict, villes: dict) -> dict:
     """
     Vérifie un critère qui se calcule (expérience, âge, lieu) à partir de la fiche et du profil.
@@ -128,7 +148,7 @@ def verifier_par_calcul(critere: dict, candidat: dict, villes: dict) -> dict:
         else:
             annees = float(annees)
             resultat["statut"] = "trouve" if annees >= valeur else "absent"
-            resultat["preuve"] = f"{_nombre(annees)} an(s) d'expérience, calculés à partir des dates du CV."
+            resultat["preuve"] = f"{duree_lisible(annees)} d'expérience, calculés à partir des dates du CV."
 
     elif type_critere in ("age_min", "age_max"):
         age = _age(fiche.get("date_naissance"))

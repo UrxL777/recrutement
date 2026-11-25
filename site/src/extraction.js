@@ -23,6 +23,7 @@ const ECART_COLONNE = 20      // au-delà, deux morceaux d'une ligne sont sépar
 async function textePdf(contenu) {
   const document = await pdfjs.getDocument({ data: contenu }).promise
   const lignes = []
+  const liensCaches = []
   for (let numero = 1; numero <= document.numPages; numero++) {
     const page = await document.getPage(numero)
     const { items } = await page.getTextContent()
@@ -48,13 +49,22 @@ async function textePdf(contenu) {
       }
       lignes.push(ligne)
     }
+    // Les liens cliquables cachés derrière un mot (ex. « GitHub ») : on ajoute leur adresse au texte
+    for (const annotation of await page.getAnnotations()) {
+      const url = annotation.url || annotation.unsafeUrl
+      if (url && /^https?:/i.test(url) && !liensCaches.includes(url)) liensCaches.push(url)
+    }
   }
+  if (liensCaches.length) lignes.push(`Liens : ${liensCaches.join(' ')}`)
   return lignes.join('\n')
 }
 
 async function texteDocx(contenu) {
-  const resultat = await mammoth.extractRawText({ arrayBuffer: contenu })
-  return resultat.value
+  const resultat = await mammoth.extractRawText({ arrayBuffer: contenu.slice(0) })
+  // Les liens cliquables cachés derrière un mot : on ajoute leur adresse au texte
+  const html = (await mammoth.convertToHtml({ arrayBuffer: contenu })).value
+  const liens = [...new Set([...html.matchAll(/href="(https?:[^"]+)"/gi)].map((m) => m[1]))]
+  return resultat.value + (liens.length ? `\nLiens : ${liens.join(' ')}` : '')
 }
 
 // Retire les puces et les symboles décoratifs, et les espaces en trop ; garde une information par ligne
