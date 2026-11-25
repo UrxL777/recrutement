@@ -3,7 +3,8 @@ RecrutSmart : le service IA (FastAPI), le chef d'orchestre
 - se connecte à Supabase (avec la clé de service) et à Groq (l'IA)
 - routes :
     /sante        vérifie que le serveur, Supabase et Groq répondent
-    /analyser-cv  appelée par le site juste après le dépôt d'un CV (analyse.py)
+    /preparer-cv  le site envoie le texte d'un CV déposé ; l'IA prépare la fiche (rien n'est enregistré)
+    /publier-cv   le candidat a cliqué sur « Publier mon CV » : tout est enregistré (analyse.py)
     /rechercher   la recherche des recruteurs, avec l'agent qui affine (recherche.py)
 """
 import json
@@ -29,9 +30,10 @@ MODELE = "openai/gpt-oss-20b"           # le modèle principal
 MODELE_SECOURS = "qwen/qwen3.8-27b"     # prend le relais si le quota du principal est épuisé
 
 
-def demander_ia(messages: list, max_tokens: int = 4000) -> dict:
+def demander_ia(messages: list, max_tokens: int = 4000, modele: str = MODELE) -> dict:
     """Envoie une demande à l'IA et rend sa réponse en JSON. Passe au modèle de secours si besoin."""
-    for modele in (MODELE, MODELE_SECOURS):
+    principal = modele
+    for modele in (principal, MODELE_SECOURS):
         try:
             reponse = groq.chat.completions.create(
                 model=modele,
@@ -45,7 +47,7 @@ def demander_ia(messages: list, max_tokens: int = 4000) -> dict:
         except Exception as erreur:
             message = str(erreur).lower()
             quota = any(m in message for m in ("429", "413", "503", "rate limit", "over capacity"))
-            if modele == MODELE and quota:
+            if modele == principal and quota:
                 print(f"[IA] Modèle principal indisponible → modèle de secours ({str(erreur)[:100]})")
                 continue
             raise
@@ -69,8 +71,13 @@ app = FastAPI(title="RecrutSmart IA")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-class DemandeAnalyse(BaseModel):
+class DemandePreparation(BaseModel):
+    texte: str              # le texte du CV, extrait par le site
+
+
+class DemandePublication(BaseModel):
     cv_id: int
+    fiche: dict             # la fiche relue (et corrigée) par le candidat
 
 
 class DemandeRecherche(BaseModel):
@@ -89,23 +96,40 @@ def sante():
     }
 
 
-@app.post("/analyser-cv")
-def analyser_cv(demande: DemandeAnalyse, authorization: str | None = Header(default=None)):
-    """
-    Appelée par le site juste après le dépôt d'un CV.
-    1. vérifie que le CV appartient bien à l'utilisateur connecté
-    2. analyse.py : fiche + résumé par l'IA, contrôles Python, passages et embeddings
-    3. rend la fiche, que le site affiche au candidat
-    """
+def candidat_connecte(authorization: str | None) -> str:
+    """L'utilisateur connecté, s'il est candidat (sinon : refus)."""
     candidat_id = utilisateur_connecte(authorization)
+    profil = supabase.table("profils").select("role").eq("id", candidat_id).maybe_single().execute()
+    if not profil or not profil.data or profil.data["role"] != "candidat":
+        raise HTTPException(status_code=403, detail="Réservé aux candidats.")
+    return candidat_id
+
+
+@app.post("/preparer-cv")
+def preparer_cv(demande: DemandePreparation, authorization: str | None = Header(default=None)):
+    """
+    Le candidat vient de déposer son CV : le site envoie le texte, l'IA prépare la fiche.
+    RIEN n'est enregistré : la fiche est seulement rendue au site, pour que le candidat la relise.
+    """
+    candidat_connecte(authorization)
+    try:
+        return {"fiche": analyse.preparer_fiche(demande.texte, demander_ia)}
+    except ValueError as erreur:
+        raise HTTPException(status_code=422, detail=str(erreur))
+
+
+@app.post("/publier-cv")
+def publier_cv(demande: DemandePublication, authorization: str | None = Header(default=None)):
+    """
+    Le candidat a cliqué sur « Publier mon CV » : le site a rangé le fichier et créé la ligne du CV (inactive).
+    1. vérifie que le CV appartient bien au candidat connecté
+    2. analyse.py enregistre la fiche et les passages, supprime l'ancien CV, puis active le nouveau
+    """
+    candidat_id = candidat_connecte(authorization)
     cv = supabase.table("cvs").select("id, candidat_id").eq("id", demande.cv_id).maybe_single().execute()
     if not cv or not cv.data or cv.data["candidat_id"] != candidat_id:
         raise HTTPException(status_code=404, detail="CV introuvable.")
-    try:
-        fiche = analyse.analyser_cv(demande.cv_id, supabase, demander_ia)
-    except ValueError as erreur:
-        raise HTTPException(status_code=422, detail=str(erreur))
-    return {"fiche": fiche}
+    return {"fiche": analyse.publier_cv(demande.cv_id, candidat_id, demande.fiche, supabase)}
 
 
 @app.post("/rechercher")

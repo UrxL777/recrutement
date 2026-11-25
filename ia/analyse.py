@@ -1,14 +1,16 @@
 """
-RecrutSmart : l'analyse d'un CV, faite une seule fois, juste après le dépôt.
+RecrutSmart : l'analyse d'un CV, en deux temps. Rien n'est enregistré tant que le candidat n'a pas publié.
 
-La démarche :
-  1. le site a déjà extrait le texte du CV (JavaScript) et l'a rangé dans cvs.texte_complet
-  2. l'IA lit le texte et remplit la fiche : identité, métier, résumé, expériences, compétences…
-  3. Python vérifie ce qui doit être exact :
-       - les liens, l'e-mail et le téléphone doivent être écrits dans le CV (sinon ils sont retirés)
-       - les dates doivent apparaître dans le CV ; les années d'expérience sont CALCULÉES par Python
-  4. le texte est découpé en passages, chacun avec son embedding (pour la recherche par le sens)
-  5. tout est enregistré : fiches_cv, cv_morceaux, et le CV passe au statut « analyse »
+1. PRÉPARER (route /preparer-cv) : rien n'est écrit en base
+     - le site a extrait le texte du CV (JavaScript) et l'envoie
+     - l'IA lit le texte et remplit la fiche : identité, métier, résumé, expériences, compétences…
+     - Python vérifie ce qui doit être exact : liens, e-mail, téléphone, dates ; il CALCULE les années d'expérience
+     - la fiche est rendue au site, qui l'affiche au candidat : il la relit et la corrige
+2. PUBLIER (route /publier-cv) : le candidat a cliqué sur « Publier mon CV »
+     - Python recalcule ce qui doit rester exact (années d'expérience, liens) à partir du texte du CV
+     - l'ancien CV du candidat est entièrement supprimé (fichier, fiche, passages)
+     - la fiche est enregistrée ; le texte est découpé en passages avec leurs embeddings (recherche par le sens)
+     - le CV devient actif : les recruteurs peuvent le trouver
 """
 import re
 from datetime import date, datetime, timezone
@@ -19,12 +21,13 @@ from fastembed import TextEmbedding
 NOM_MODELE_EMBEDDINGS = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 _modele_embeddings = None
 
+MODELE_ANALYSE = "openai/gpt-oss-120b"   # le grand modèle : plus précis sur les mises en page compliquées
 LONGUEUR_MIN_TEXTE = 50       # en dessous, le CV est considéré comme vide (PDF scanné, par exemple)
 LONGUEUR_MAX_TEXTE = 15000    # au-delà, la fin du texte n'est pas envoyée à l'IA (limite de tokens)
 TAILLE_PASSAGE = 500          # nombre de caractères visé pour chaque passage
 
 PROMPT_FICHE = """Tu lis le texte d'un CV, extrait d'un fichier PDF ou Word. La mise en page est perdue : les colonnes peuvent être mélangées, et le signe « | » sépare deux textes placés côte à côte sur la même ligne (souvent deux colonnes, ou un intitulé et ses dates).
-Remplis la fiche du candidat.
+Remplis la fiche du candidat. Écris tout en français, y compris le résumé.
 
 Règles :
 - Recopie uniquement ce qui est écrit dans le CV. Si une information n'y est pas, mets null ou une liste vide. N'invente rien et ne devine rien.
@@ -32,9 +35,12 @@ Règles :
 - "debut" et "fin" sont au format AAAA-MM, ou AAAA si le mois n'est pas écrit ; convertis les mois écrits en lettres. Pour un poste ou une formation en cours, "fin" vaut "aujourd'hui". Si la fin n'est pas écrite, "fin" vaut null.
 - "periode" : la période recopiée telle qu'elle est écrite dans le CV, ou null si aucune date n'est écrite.
 - "date_naissance" est au format AAAA-MM-JJ, seulement si elle est écrite dans le CV.
-- "titre" : le métier principal du candidat.
-- "resume" : deux ou trois phrases à la troisième personne qui présentent son métier, son expérience et ses points forts, uniquement à partir du CV.
-- "autres_infos" : toutes les informations qui ne rentrent dans aucune autre case (loisirs, centres d'intérêt, qualités, situation familiale, permis, disponibilité, et tout le reste), chacune en une phrase courte, fidèle au CV.
+- "titre" : le métier du candidat, formulé comme un intitulé de poste, d'après l'ensemble du CV (ses compétences, ses projets, sa formation). C'est toujours un métier, ce que le candidat sait faire, jamais un statut comme étudiant, apprenant, élève ou stagiaire.
+- "resume" : rédige toi-même deux ou trois phrases à la troisième personne qui présentent le candidat d'après l'ensemble du CV (son métier, son expérience, ses compétences principales, ses projets). Ne recopie pas le paragraphe de présentation du CV.
+- "competences" : chaque compétence séparément (un langage, un outil, une méthode, un savoir-faire), avec son nom habituel, sans doublon, y compris celles qui apparaissent seulement dans les expériences, les missions ou les projets.
+- "certifications" : les certificats obtenus ; ne les répète pas dans "formations".
+- "projets" : "lien" seulement si une adresse est écrite juste à côté du projet dans le CV.
+- "autres_infos" : toutes les informations qui ne rentrent dans aucune autre case (loisirs, centres d'intérêt, qualités, situation familiale, permis, disponibilité, et tout le reste), chacune en une phrase courte, fidèle au CV. Les missions d'un poste vont dans ce poste, pas ici.
 
 Réponds uniquement en JSON :
 {"nom": texte ou null, "prenom": texte ou null, "date_naissance": texte ou null, "email": texte ou null, "telephone": texte ou null,
@@ -140,7 +146,7 @@ def annees_experience(experiences: list, texte: str, aujourd_hui: date | None = 
             total += fin_cours - debut_cours
             debut_cours, fin_cours = debut, fin
     total += fin_cours - debut_cours
-    return round(total / 12, 1)
+    return round(total / 12, 2)
 
 
 def date_naissance_du_cv(proposee: str | None, texte: str) -> str | None:
@@ -184,6 +190,17 @@ def _normaliser_espaces(t: str) -> str:
     return re.sub(r"\s+", " ", (t or "").lower()).replace("–", "-").replace("—", "-")
 
 
+def _lien_proche_du_projet(nom: str, cle_lien: str, texte: str) -> bool:
+    """Le lien est-il écrit à côté du projet (sur la même ligne ou la suivante) ?"""
+    lignes = [_normaliser_espaces(l) for l in texte.splitlines()]
+    debut_nom = _normaliser_espaces(nom)[:25]
+    for i, ligne in enumerate(lignes):
+        if debut_nom and debut_nom in ligne:
+            if any(cle_lien in l for l in lignes[i:i + 2]):
+                return True
+    return False
+
+
 def controler_fiche(brute: dict, texte: str) -> dict:
     """Remet la fiche de l'IA en forme et vérifie ce qui doit être exact."""
     experiences = [
@@ -197,6 +214,11 @@ def controler_fiche(brute: dict, texte: str) -> dict:
          "debut": _texte(f.get("debut")), "fin": _texte(f.get("fin")), "periode": _periode(f.get("periode"), texte)}
         for f in brute.get("formations") or [] if isinstance(f, dict) and _texte(f.get("diplome"))
     ]
+    # Une certification n'est pas aussi une formation
+    certifications = _liste_textes(brute.get("certifications"))
+    certifs = [_normaliser_espaces(c) for c in certifications]
+    formations = [f for f in formations
+                  if not any(_normaliser_espaces(f["diplome"]) in c or c in _normaliser_espaces(f["diplome"]) for c in certifs)]
     liens = liens_du_cv(texte)
     urls = {re.sub(r"^(https?://)?(www\.)?", "", l["url"].lower()).rstrip("/"): l["url"] for l in liens}
     projets = []
@@ -207,7 +229,8 @@ def controler_fiche(brute: dict, texte: str) -> dict:
         cle = re.sub(r"^(https?://)?(www\.)?", "", (lien or "").lower()).rstrip("/")
         projets.append({"nom": _texte(p.get("nom")), "description": _texte(p.get("description")),
                         "technologies": _liste_textes(p.get("technologies")),
-                        "lien": urls.get(cle) if cle else None})   # un lien absent du CV est retiré
+                        # un lien absent du CV, ou écrit loin du projet, n'est pas attaché au projet
+                        "lien": urls.get(cle) if cle and _lien_proche_du_projet(p["nom"], cle, texte) else None})
     return {
         "nom": _texte(brute.get("nom")),
         "prenom": _texte(brute.get("prenom")),
@@ -222,7 +245,7 @@ def controler_fiche(brute: dict, texte: str) -> dict:
         "formations": formations,
         "competences": _liste_textes(brute.get("competences")),
         "langues": _liste_textes(brute.get("langues")),
-        "certifications": _liste_textes(brute.get("certifications")),
+        "certifications": certifications,
         "projets": projets,
         "liens": liens,
         "autres_infos": _liste_textes(brute.get("autres_infos")),
@@ -256,41 +279,70 @@ def calculer_embeddings(textes: list) -> list:
     return [[round(float(x), 6) for x in vecteur] for vecteur in _modele_embeddings.embed(textes)]
 
 
-# ─── L'analyse complète ───────────────────────────────────────────────────────
+# ─── 1. Préparer : la fiche, sans rien enregistrer ────────────────────────────
 
-def analyser_texte(texte: str, demander_ia) -> tuple:
-    """Le texte d'un CV → (la fiche vérifiée, les passages avec leurs embeddings). N'écrit rien en base."""
+def preparer_fiche(texte: str, demander_ia) -> dict:
+    """Le texte d'un CV → la fiche vérifiée, rendue au site. N'écrit rien en base."""
     texte = texte.strip()
     if len(texte) < LONGUEUR_MIN_TEXTE:
         raise ValueError("Le texte du CV est vide ou presque : c'est peut-être un PDF scanné (une image).")
     brute = demander_ia([
         {"role": "system", "content": PROMPT_FICHE},
         {"role": "user", "content": texte[:LONGUEUR_MAX_TEXTE]},
-    ])
-    fiche = controler_fiche(brute, texte)
-    passages = decouper_en_passages(texte)
-    embeddings = calculer_embeddings(passages)
-    return fiche, list(zip(passages, embeddings))
+    ], modele=MODELE_ANALYSE)
+    return controler_fiche(brute, texte)
 
 
-def analyser_cv(cv_id: int, supabase, demander_ia) -> dict:
-    """Analyse le CV n° cv_id et enregistre tout. Rend la fiche (affichée au candidat)."""
-    cv = supabase.table("cvs").select("texte_complet").eq("id", cv_id).single().execute()
+# ─── 2. Publier : l'enregistrement, quand le candidat a validé ────────────────
+
+CHAMPS_TEXTE = ("nom", "prenom", "email", "telephone", "localisation", "titre", "resume")
+CHAMPS_LISTES = ("experiences", "formations", "competences", "langues", "certifications", "projets", "autres_infos")
+
+
+def supprimer_anciens_cv(candidat_id: str, cv_garde: int, supabase) -> int:
+    """Supprime tous les autres CV du candidat : les fichiers du stockage, puis les lignes (fiches et passages suivent)."""
+    anciens = supabase.table("cvs").select("id, chemin_stockage").eq("candidat_id", candidat_id) \
+        .neq("id", cv_garde).execute().data or []
+    if anciens:
+        supabase.storage.from_("cvs").remove([a["chemin_stockage"] for a in anciens])
+        supabase.table("cvs").delete().in_("id", [a["id"] for a in anciens]).execute()
+    return len(anciens)
+
+
+def publier_cv(cv_id: int, candidat_id: str, fiche_relue: dict, supabase) -> dict:
+    """
+    Enregistre le CV n° cv_id avec la fiche relue par le candidat, et supprime son ancien CV.
+    Le candidat peut corriger les textes et les listes ; ce qui doit rester exact est recalculé par Python.
+    """
+    cv = supabase.table("cvs").select("texte_complet, chemin_stockage, actif").eq("id", cv_id).single().execute().data
+    texte = cv.get("texte_complet") or ""
+    fiche = {c: (str(fiche_relue.get(c)).strip() or None) if fiche_relue.get(c) is not None else None for c in CHAMPS_TEXTE}
+    fiche.update({c: fiche_relue.get(c) if isinstance(fiche_relue.get(c), list) else [] for c in CHAMPS_LISTES})
+    fiche["competences"] = _liste_textes(fiche["competences"])
+    fiche["date_naissance"] = date_naissance_du_cv(fiche_relue.get("date_naissance"), texte)
+    fiche["annees_experience"] = annees_experience(fiche["experiences"], texte)   # jamais pris tel quel du site
+    fiche["liens"] = liens_du_cv(texte)
     try:
-        fiche, passages = analyser_texte(cv.data.get("texte_complet") or "", demander_ia)
         supabase.table("fiches_cv").upsert(
-            {"cv_id": cv_id, **fiche, "valide_par_candidat": False, "analyse_le": datetime.now(timezone.utc).isoformat()},
+            {"cv_id": cv_id, **fiche, "valide_par_candidat": True, "analyse_le": datetime.now(timezone.utc).isoformat()},
             on_conflict="cv_id",
         ).execute()
-        supabase.table("cv_morceaux").delete().eq("cv_id", cv_id).execute()
-        if passages:
+        # Les passages ne sont calculés qu'une fois par CV (une simple correction de la fiche ne les change pas)
+        deja = supabase.table("cv_morceaux").select("id", count="exact").eq("cv_id", cv_id).limit(1).execute()
+        if not deja.count:
+            passages = decouper_en_passages(texte)
             supabase.table("cv_morceaux").insert(
-                [{"cv_id": cv_id, "contenu": contenu, "embedding": vecteur} for contenu, vecteur in passages]
+                [{"cv_id": cv_id, "contenu": c, "embedding": v} for c, v in zip(passages, calculer_embeddings(passages))]
             ).execute()
-        supabase.table("cvs").update({"statut": "analyse", "erreur": None}).eq("id", cv_id).execute()
-        print(f"[ANALYSE] ✓ CV {cv_id} : {len(passages)} passages, {fiche['annees_experience']} an(s) d'expérience")
-        return fiche
+        # Tout est prêt : l'ancien CV est supprimé, puis le nouveau devient actif (visible des recruteurs)
+        nb_supprimes = supprimer_anciens_cv(candidat_id, cv_id, supabase)
+        supabase.table("cvs").update({"statut": "analyse", "erreur": None, "actif": True}).eq("id", cv_id).execute()
+        print(f"[PUBLIER] ✓ CV {cv_id} publié ({nb_supprimes} ancien(s) CV supprimé(s))")
+        return {**fiche, "cv_id": cv_id, "valide_par_candidat": True}
     except Exception as erreur:
-        supabase.table("cvs").update({"statut": "erreur", "erreur": str(erreur)[:500]}).eq("id", cv_id).execute()
-        print(f"[ANALYSE] ✗ CV {cv_id} : {erreur}")
+        # Rien ne doit rester à moitié : un nouveau CV qui n'a pas pu être publié est retiré
+        if not cv.get("actif"):
+            supabase.storage.from_("cvs").remove([cv["chemin_stockage"]])
+            supabase.table("cvs").delete().eq("id", cv_id).execute()
+        print(f"[PUBLIER] ✗ CV {cv_id} : {erreur}")
         raise

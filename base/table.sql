@@ -116,7 +116,7 @@ create table public.fiches_cv (
   titre                text,                         -- le métier principal
   resume               text,                         -- affiché au candidat ET au recruteur
   experiences          jsonb not null default '[]',  -- [{poste, entreprise, debut, fin, missions}]
-  annees_experience    numeric(4, 1),                -- calculées par Python à partir des dates
+  annees_experience    numeric(5, 2),                -- calculées par Python à partir des dates (2 décimales : les mois justes)
   formations           jsonb not null default '[]',  -- [{diplome, ecole, debut, fin}]
   competences          text[] not null default '{}',
   langues              text[] not null default '{}',
@@ -312,3 +312,10 @@ $$;
 -- Réservée au serveur (clé de service) : le site ne peut pas l'appeler
 revoke execute on function public.passages_proches(vector, int) from public, anon, authenticated;
 grant execute on function public.passages_proches(vector, int) to service_role;
+
+
+-- ════════════════════════════════════════════════════════════════
+--  Mise à jour (déjà incluse plus haut pour une nouvelle base) :
+--  les années d'expérience gardent 2 décimales, pour afficher les mois justes (« 4 mois », pas « 0,3 an »).
+-- ════════════════════════════════════════════════════════════════
+alter table public.fiches_cv alter column annees_experience type numeric(5, 2);
