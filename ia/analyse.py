@@ -3,11 +3,12 @@ RecrutSmart : l'analyse d'un CV, en deux temps. Rien n'est enregistré tant que 
 
 1. PRÉPARER (route /preparer-cv) : rien n'est écrit en base
      - le site a extrait le texte du CV (JavaScript) et l'envoie
-     - l'IA lit le texte et remplit la fiche : identité, métier, résumé, expériences, compétences…
-     - Python vérifie ce qui doit être exact : liens, e-mail, téléphone, dates ; il CALCULE les années d'expérience
-     - la fiche est rendue au site, qui l'affiche au candidat : il la relit et la corrige
+     - l'IA lit le texte brut et range tout ce qu'il contient : identité, métier, résumé, expériences,
+       puis une rubrique par sorte d'information (formations, projets, compétences… selon le CV)
+     - Python vérifie ce qui doit être exact : liens, e-mail, téléphone, dates, âge ; il CALCULE les années d'expérience
+     - la fiche est rendue au site, qui l'affiche au candidat : s'il n'est pas d'accord, il redépose son CV
 2. PUBLIER (route /publier-cv) : le candidat a cliqué sur « Publier mon CV »
-     - Python recalcule ce qui doit rester exact (années d'expérience, liens) à partir du texte du CV
+     - Python refait tous ses contrôles à partir du texte du CV (rien n'est pris tel quel du site)
      - l'ancien CV du candidat est entièrement supprimé (fichier, fiche, passages)
      - la fiche est enregistrée ; le texte est découpé en passages avec leurs embeddings (recherche par le sens)
      - le CV devient actif : les recruteurs peuvent le trouver
@@ -26,30 +27,30 @@ LONGUEUR_MIN_TEXTE = 50       # en dessous, le CV est considéré comme vide (PD
 LONGUEUR_MAX_TEXTE = 15000    # au-delà, la fin du texte n'est pas envoyée à l'IA (limite de tokens)
 TAILLE_PASSAGE = 500          # nombre de caractères visé pour chaque passage
 
-PROMPT_FICHE = """Tu lis le texte d'un CV, extrait d'un fichier PDF ou Word. La mise en page est perdue : les colonnes peuvent être mélangées, et le signe « | » sépare deux textes placés côte à côte sur la même ligne (souvent deux colonnes, ou un intitulé et ses dates).
-Remplis la fiche du candidat. Écris tout en français, y compris le résumé.
+PROMPT_FICHE = """Tu lis le texte brut d'un CV, extrait d'un fichier PDF ou Word. La mise en page est perdue : les colonnes se suivent, et des éléments écrits à droite ou en petit (dates, outils) peuvent être regroupés ailleurs dans le texte, souvent au début.
+Les dates regroupées à part appartiennent, dans l'ordre où elles apparaissent, aux expériences puis aux formations, dans l'ordre où celles-ci apparaissent : rattache chaque date à son élément d'après cet ordre et le sens (une date « en cours » va à un élément en cours).
+Chaque CV est écrit différemment : comprends chaque partie d'après son contenu, quel que soit son titre (« domaine », « métier », « atouts », « savoir-être »…).
+Écris tout en français.
 
 Règles :
-- Recopie uniquement ce qui est écrit dans le CV. Si une information n'y est pas, mets null ou une liste vide. N'invente rien et ne devine rien.
-- Garde les noms des entreprises, des écoles, des outils et des technologies comme ils sont écrits.
-- "debut" et "fin" sont au format AAAA-MM, ou AAAA si le mois n'est pas écrit ; convertis les mois écrits en lettres. Pour un poste ou une formation en cours, "fin" vaut "aujourd'hui". Si la fin n'est pas écrite, "fin" vaut null.
-- "periode" : la période recopiée telle qu'elle est écrite dans le CV, ou null si aucune date n'est écrite.
-- "date_naissance" est au format AAAA-MM-JJ, seulement si elle est écrite dans le CV.
-- "titre" : le métier du candidat, formulé comme un intitulé de poste, d'après l'ensemble du CV (ses compétences, ses projets, sa formation). C'est toujours un métier, ce que le candidat sait faire, jamais un statut comme étudiant, apprenant, élève ou stagiaire.
-- "resume" : rédige toi-même deux ou trois phrases à la troisième personne qui présentent le candidat d'après l'ensemble du CV (son métier, son expérience, ses compétences principales, ses projets). Ne recopie pas le paragraphe de présentation du CV.
-- "competences" : chaque compétence séparément (un langage, un outil, une méthode, un savoir-faire), avec son nom habituel, sans doublon, y compris celles qui apparaissent seulement dans les expériences, les missions ou les projets.
-- "certifications" : les certificats obtenus ; ne les répète pas dans "formations".
-- "projets" : "lien" seulement si une adresse est écrite juste à côté du projet dans le CV.
-- "autres_infos" : toutes les informations qui ne rentrent dans aucune autre case (loisirs, centres d'intérêt, qualités, situation familiale, permis, disponibilité, et tout le reste), chacune en une phrase courte, fidèle au CV. Les missions d'un poste vont dans ce poste, pas ici.
+- N'invente rien et ne devine rien : seulement ce qui est écrit dans le CV. Une information absente vaut null ou une liste vide.
+- N'oublie rien : chaque information utile du CV doit se retrouver dans la fiche (identité, expériences ou rubriques).
+- "nom" : le nom de famille ; "prenom" : tous les prénoms, tels qu'ils sont écrits.
+- "titre" : le métier du candidat, déduit de l'ensemble du CV (l'intitulé en tête, les compétences, les projets, la formation), formulé comme un intitulé de poste sur une offre d'emploi : il commence par le nom du métier, qui désigne la personne. Jamais un statut (étudiant, apprenant, stagiaire), jamais un simple domaine.
+- "date_naissance" au format AAAA-MM-JJ, seulement si elle est écrite. "age" : un nombre, seulement si l'âge est écrit (« 25 ans »).
+- "resume" : trois phrases courtes, 40 mots au plus, rédigées par toi, à la troisième personne : le métier (celui de "titre"), l'expérience, la formation principale et les points forts. Ne recopie pas le paragraphe de présentation du CV. Chaque affirmation doit être exacte : une formation « en cours » est suivie, pas obtenue (n'écris jamais « titulaire » ou « diplômé » pour elle).
+- "experiences" : les emplois et les stages. "debut" et "fin" au format AAAA-MM, ou AAAA si le mois n'est pas écrit ; "fin" vaut "aujourd'hui" pour un poste en cours, null si elle n'est pas écrite. "periode" : la période recopiée telle qu'elle est écrite, ou null.
+- "rubriques" : tout le reste du CV, rangé par sorte d'information, dans cet ordre quand elles existent : formations, diplômes, certifications, projets, compétences, langues, qualités, centres d'intérêt, puis tout ce qui reste (disponibilité, permis, situation familiale, habitudes, religion, et toute autre information). Ne crée une rubrique que si le CV en parle.
+  "titre" : le nom court de la rubrique (« Formations », « Projets », « Compétences »…).
+  "contenu" : une seule ligne, tous les éléments de la rubrique séparés par des virgules, chacun en quelques mots, avec la précision utile entre parenthèses (école, organisme, année ou « en cours », niveau, outil).
+  La rubrique « Compétences » rassemble tous les langages, outils, logiciels et savoir-faire cités n'importe où dans le CV (y compris dans les expériences et les projets), chacun une seule fois.
+  Ne mets pas dans les rubriques le nom, le métier, le contact, les liens ni les expériences : ils ont déjà leur place.
 
 Réponds uniquement en JSON :
-{"nom": texte ou null, "prenom": texte ou null, "date_naissance": texte ou null, "email": texte ou null, "telephone": texte ou null,
- "localisation": texte ou null, "titre": texte ou null, "resume": texte,
- "experiences": [{"poste": texte, "entreprise": texte ou null, "debut": texte ou null, "fin": texte ou null, "periode": texte ou null, "missions": [texte]}],
- "formations": [{"diplome": texte, "ecole": texte ou null, "debut": texte ou null, "fin": texte ou null, "periode": texte ou null}],
- "competences": [texte], "langues": [texte], "certifications": [texte],
- "projets": [{"nom": texte, "description": texte ou null, "technologies": [texte], "lien": texte ou null}],
- "autres_infos": [texte]}"""
+{"nom": texte ou null, "prenom": texte ou null, "date_naissance": texte ou null, "age": nombre ou null,
+ "email": texte ou null, "telephone": texte ou null, "localisation": texte ou null, "titre": texte ou null, "resume": texte,
+ "experiences": [{"poste": texte, "entreprise": texte ou null, "debut": texte ou null, "fin": texte ou null, "periode": texte ou null}],
+ "rubriques": [{"titre": texte, "contenu": texte}]}"""
 
 
 # ─── Les contrôles Python ─────────────────────────────────────────────────────
@@ -162,22 +163,28 @@ def date_naissance_du_cv(proposee: str | None, texte: str) -> str | None:
     return naissance.isoformat() if 16 <= age <= 80 else None
 
 
-def _liste_textes(valeur) -> list:
-    """Une liste de textes propres, sans doublon (l'IA ne renvoie pas toujours exactement une liste)."""
-    if not isinstance(valeur, list):
-        return []
-    propres, vus = [], set()
-    for v in valeur:
-        t = str(v).strip() if v is not None else ""
-        if t and t.lower() not in vus:
-            vus.add(t.lower())
-            propres.append(t)
-    return propres
+def age_du_cv(propose, texte: str) -> int | None:
+    """L'âge, gardé seulement s'il est écrit dans le CV (« 25 ans », jamais « 3 ans d'expérience ») et plausible."""
+    try:
+        age = int(propose)
+    except (TypeError, ValueError):
+        return None
+    if not 16 <= age <= 80:
+        return None
+    for m in re.finditer(rf"(?<!\d){age}\s*ans\b(?!\s*(d['’]|de\s|en\s))", texte, re.IGNORECASE):
+        return age
+    return None
 
 
 def _texte(valeur) -> str | None:
     t = str(valeur).strip() if valeur is not None else ""
     return t or None
+
+
+def _prenom(valeur) -> str | None:
+    """« ANGE URIEL » → « Ange Uriel » (un prénom écrit tout en majuscules est remis en forme)."""
+    prenom = _texte(valeur)
+    return prenom.title() if prenom and prenom.isupper() else prenom
 
 
 def _periode(valeur, texte: str) -> str | None:
@@ -190,65 +197,37 @@ def _normaliser_espaces(t: str) -> str:
     return re.sub(r"\s+", " ", (t or "").lower()).replace("–", "-").replace("—", "-")
 
 
-def _lien_proche_du_projet(nom: str, cle_lien: str, texte: str) -> bool:
-    """Le lien est-il écrit à côté du projet (sur la même ligne ou la suivante) ?"""
-    lignes = [_normaliser_espaces(l) for l in texte.splitlines()]
-    debut_nom = _normaliser_espaces(nom)[:25]
-    for i, ligne in enumerate(lignes):
-        if debut_nom and debut_nom in ligne:
-            if any(cle_lien in l for l in lignes[i:i + 2]):
-                return True
-    return False
-
-
 def controler_fiche(brute: dict, texte: str) -> dict:
     """Remet la fiche de l'IA en forme et vérifie ce qui doit être exact."""
-    experiences = [
-        {"poste": _texte(e.get("poste")), "entreprise": _texte(e.get("entreprise")),
-         "debut": _texte(e.get("debut")), "fin": _texte(e.get("fin")),
-         "periode": _periode(e.get("periode"), texte), "missions": _liste_textes(e.get("missions"))}
-        for e in brute.get("experiences") or [] if isinstance(e, dict) and _texte(e.get("poste"))
-    ]
-    formations = [
-        {"diplome": _texte(f.get("diplome")), "ecole": _texte(f.get("ecole")),
-         "debut": _texte(f.get("debut")), "fin": _texte(f.get("fin")), "periode": _periode(f.get("periode"), texte)}
-        for f in brute.get("formations") or [] if isinstance(f, dict) and _texte(f.get("diplome"))
-    ]
-    # Une certification n'est pas aussi une formation
-    certifications = _liste_textes(brute.get("certifications"))
-    certifs = [_normaliser_espaces(c) for c in certifications]
-    formations = [f for f in formations
-                  if not any(_normaliser_espaces(f["diplome"]) in c or c in _normaliser_espaces(f["diplome"]) for c in certifs)]
-    liens = liens_du_cv(texte)
-    urls = {re.sub(r"^(https?://)?(www\.)?", "", l["url"].lower()).rstrip("/"): l["url"] for l in liens}
-    projets = []
-    for p in brute.get("projets") or []:
-        if not isinstance(p, dict) or not _texte(p.get("nom")):
+    aujourd_hui = date.today()
+    experiences = []
+    for e in brute.get("experiences") or []:
+        if not isinstance(e, dict) or not _texte(e.get("poste")):
             continue
-        lien = _texte(p.get("lien"))
-        cle = re.sub(r"^(https?://)?(www\.)?", "", (lien or "").lower()).rstrip("/")
-        projets.append({"nom": _texte(p.get("nom")), "description": _texte(p.get("description")),
-                        "technologies": _liste_textes(p.get("technologies")),
-                        # un lien absent du CV, ou écrit loin du projet, n'est pas attaché au projet
-                        "lien": urls.get(cle) if cle and _lien_proche_du_projet(p["nom"], cle, texte) else None})
+        exp = {"poste": _texte(e.get("poste")), "entreprise": _texte(e.get("entreprise")),
+               "debut": _texte(e.get("debut")), "fin": _texte(e.get("fin")), "periode": _periode(e.get("periode"), texte)}
+        exp["duree"] = annees_experience([exp], texte, aujourd_hui)   # la durée de ce poste, calculée par Python
+        experiences.append(exp)
+    rubriques = []
+    for r in brute.get("rubriques") or []:
+        if isinstance(r, dict) and _texte(r.get("titre")) and _texte(r.get("contenu")):
+            rubriques.append({"titre": _texte(r.get("titre")), "contenu": _texte(r.get("contenu"))})
+    date_naissance = date_naissance_du_cv(brute.get("date_naissance"), texte)
     return {
         "nom": _texte(brute.get("nom")),
-        "prenom": _texte(brute.get("prenom")),
-        "date_naissance": date_naissance_du_cv(brute.get("date_naissance"), texte),
+        "prenom": _prenom(brute.get("prenom")),
+        "date_naissance": date_naissance,
+        # l'âge écrit n'est gardé que s'il n'y a pas de date de naissance (sinon l'âge est calculé à partir d'elle)
+        "age": None if date_naissance else age_du_cv(brute.get("age"), texte),
         "email": email_du_cv(_texte(brute.get("email")), texte),
         "telephone": telephone_du_cv(_texte(brute.get("telephone")), texte),
         "localisation": _texte(brute.get("localisation")),
         "titre": _texte(brute.get("titre")),
         "resume": _texte(brute.get("resume")) or "",
         "experiences": experiences,
-        "annees_experience": annees_experience(experiences, texte),
-        "formations": formations,
-        "competences": _liste_textes(brute.get("competences")),
-        "langues": _liste_textes(brute.get("langues")),
-        "certifications": certifications,
-        "projets": projets,
-        "liens": liens,
-        "autres_infos": _liste_textes(brute.get("autres_infos")),
+        "annees_experience": annees_experience(experiences, texte, aujourd_hui),
+        "liens": liens_du_cv(texte),
+        "rubriques": rubriques,
     }
 
 
@@ -295,8 +274,6 @@ def preparer_fiche(texte: str, demander_ia) -> dict:
 
 # ─── 2. Publier : l'enregistrement, quand le candidat a validé ────────────────
 
-CHAMPS_TEXTE = ("nom", "prenom", "email", "telephone", "localisation", "titre", "resume")
-CHAMPS_LISTES = ("experiences", "formations", "competences", "langues", "certifications", "projets", "autres_infos")
 
 
 def supprimer_anciens_cv(candidat_id: str, cv_garde: int, supabase) -> int:
@@ -311,23 +288,18 @@ def supprimer_anciens_cv(candidat_id: str, cv_garde: int, supabase) -> int:
 
 def publier_cv(cv_id: int, candidat_id: str, fiche_relue: dict, supabase) -> dict:
     """
-    Enregistre le CV n° cv_id avec la fiche relue par le candidat, et supprime son ancien CV.
-    Le candidat peut corriger les textes et les listes ; ce qui doit rester exact est recalculé par Python.
+    Enregistre le CV n° cv_id avec la fiche que le candidat a lue et acceptée, et supprime son ancien CV.
+    La fiche repasse par tous les contrôles Python, à partir du texte du CV.
     """
     cv = supabase.table("cvs").select("texte_complet, chemin_stockage, actif").eq("id", cv_id).single().execute().data
     texte = cv.get("texte_complet") or ""
-    fiche = {c: (str(fiche_relue.get(c)).strip() or None) if fiche_relue.get(c) is not None else None for c in CHAMPS_TEXTE}
-    fiche.update({c: fiche_relue.get(c) if isinstance(fiche_relue.get(c), list) else [] for c in CHAMPS_LISTES})
-    fiche["competences"] = _liste_textes(fiche["competences"])
-    fiche["date_naissance"] = date_naissance_du_cv(fiche_relue.get("date_naissance"), texte)
-    fiche["annees_experience"] = annees_experience(fiche["experiences"], texte)   # jamais pris tel quel du site
-    fiche["liens"] = liens_du_cv(texte)
+    fiche = controler_fiche(fiche_relue, texte)
     try:
         supabase.table("fiches_cv").upsert(
             {"cv_id": cv_id, **fiche, "valide_par_candidat": True, "analyse_le": datetime.now(timezone.utc).isoformat()},
             on_conflict="cv_id",
         ).execute()
-        # Les passages ne sont calculés qu'une fois par CV (une simple correction de la fiche ne les change pas)
+        # Les passages ne sont calculés qu'une fois par CV
         deja = supabase.table("cv_morceaux").select("id", count="exact").eq("cv_id", cv_id).limit(1).execute()
         if not deja.count:
             passages = decouper_en_passages(texte)

@@ -112,6 +112,11 @@ def _age(date_naissance) -> int | None:
     return aujourd_hui.year - naissance.year - ((aujourd_hui.month, aujourd_hui.day) < (naissance.month, naissance.day))
 
 
+def age_du_candidat(fiche: dict) -> int | None:
+    """Calculé à partir de la date de naissance ; sinon l'âge écrit dans le CV."""
+    return _age(fiche.get("date_naissance")) or fiche.get("age")
+
+
 def _nombre(n: float) -> str:
     return f"{n:g}".replace(".", ",")
 
@@ -151,13 +156,14 @@ def verifier_par_calcul(critere: dict, candidat: dict, villes: dict) -> dict:
             resultat["preuve"] = f"{duree_lisible(annees)} d'expérience, calculés à partir des dates du CV."
 
     elif type_critere in ("age_min", "age_max"):
-        age = _age(fiche.get("date_naissance"))
+        age = age_du_candidat(fiche)
         if age is None:
-            resultat["preuve"] = "Date de naissance non mentionnée dans le CV."
+            resultat["preuve"] = "Âge et date de naissance non mentionnés dans le CV."
         else:
             ok = age >= valeur if type_critere == "age_min" else age <= valeur
             resultat["statut"] = "trouve" if ok else "absent"
-            resultat["preuve"] = f"{age} ans (né(e) le {date.fromisoformat(str(fiche['date_naissance'])).strftime('%d/%m/%Y')})."
+            resultat["preuve"] = (f"{age} ans (né(e) le {date.fromisoformat(str(fiche['date_naissance'])).strftime('%d/%m/%Y')})."
+                                  if fiche.get("date_naissance") else f"{age} ans, d'après le CV.")
 
     elif type_critere == "lieu":
         lieux_candidat = [l for l in (candidat["profil"].get("lieu_residence"), fiche.get("localisation")) if l]
@@ -284,6 +290,7 @@ def classer(criteres: list, candidats: list, villes: dict, chercher_passages, de
             "titre": fiche.get("titre"),
             "resume": fiche.get("resume"),
             "lieu_residence": profil.get("lieu_residence"),
+            "age": age_du_candidat(fiche),
             "annees_experience": fiche.get("annees_experience"),
             "liens": fiche.get("liens") or [],
             "valide_par_candidat": fiche.get("valide_par_candidat", False),

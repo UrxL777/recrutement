@@ -24,6 +24,7 @@ function CarteCandidat({ r, nbCriteres, onErreur }) {
           <h3 className="text-lg font-semibold">{r.prenom} {r.nom}</h3>
           <p className="text-slate-600">
             {r.titre || 'Métier non précisé'} · {r.lieu_residence}
+            {r.age != null && ` · ${r.age} ans`}
             {r.annees_experience != null && ` · ${dureeLisible(r.annees_experience)} d'expérience`}
           </p>
           {r.valide_par_candidat && <span className="mt-1 inline-block text-xs font-medium text-green-700">✓ Fiche vérifiée par le candidat</span>}

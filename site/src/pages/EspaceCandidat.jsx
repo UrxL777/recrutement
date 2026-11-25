@@ -1,15 +1,18 @@
 // L'espace candidat, sur une seule page. Rien n'est enregistré tant que le candidat n'a pas publié.
-//   1. il dépose son CV (PDF ou Word) : le texte est extrait ici, dans le navigateur (extraction.js)
-//   2. le serveur IA prépare la fiche (/preparer-cv) : RIEN n'est enregistré, la fiche est seulement affichée
-//   3. le candidat relit, corrige, puis clique sur « Publier mon CV » :
+//   1. la zone de dépôt reste toujours en haut : on peut déposer, ou redéposer, à tout moment
+//   2. le texte est extrait ici, dans le navigateur (extraction.js), puis l'IA l'analyse (/preparer-cv) :
+//      RIEN n'est enregistré, la fiche est seulement affichée sous la zone de dépôt
+//   3. si le candidat est d'accord, il clique sur « Publier mon CV » :
 //        le fichier va dans le stockage privé, la ligne du CV est créée, puis le serveur (/publier-cv)
 //        enregistre la fiche et les passages, supprime l'ancien CV et rend le nouveau visible des recruteurs
-//   4. ensuite : « Modifier ma fiche » ou « Mettre à jour mon CV » (un nouveau dépôt remplace l'ancien à la publication)
-import { useEffect, useState } from 'react'
+//      s'il n'est pas d'accord, il redépose son CV (l'analyse recommence) ou il annule
+//   4. une fois publié : « Voir mon CV » et « Mettre à jour mon CV » (redéposer)
+import { useEffect, useRef, useState } from 'react'
 import { appelerServeur, ouvrirCv, supabase } from '../supabase'
 import { extraireTexte, TAILLE_MAX_MO, typeDuFichier } from '../extraction'
 
-const champ = 'w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-principal focus:outline-none'
+const bouton = 'rounded-lg bg-principal px-5 py-2.5 font-medium text-white hover:bg-principal-fonce'
+const boutonClair = 'rounded-lg border border-slate-300 px-5 py-2.5 hover:bg-slate-50'
 
 // Une durée en années → « 4 mois », « 1 an », « 3 ans et 2 mois »
 export function dureeLisible(annees) {
@@ -21,123 +24,94 @@ export function dureeLisible(annees) {
   return morceaux.join(' et ')
 }
 
-// La période d'une expérience ou d'une formation, en phrase claire
-function periodeLisible(x) {
-  if (x.periode) return x.periode                       // telle qu'écrite dans le CV
-  if (x.debut && x.fin) return `${x.debut} – ${x.fin}`
-  if (x.debut) return `Depuis ${x.debut} (date de fin non précisée dans le CV)`
-  return 'Dates non mentionnées dans le CV'
-}
-
-function texteExperience(fiche) {
-  if (fiche.annees_experience == null) {
-    return "Durée d'expérience non calculée : les dates des expériences ne sont pas mentionnées dans le CV."
+// L'âge : calculé à partir de la date de naissance, sinon l'âge écrit dans le CV
+export function ageDe(fiche) {
+  if (fiche.date_naissance) {
+    const naissance = new Date(fiche.date_naissance), jour = new Date()
+    let age = jour.getFullYear() - naissance.getFullYear()
+    if (jour < new Date(jour.getFullYear(), naissance.getMonth(), naissance.getDate())) age -= 1
+    return age
   }
-  const sansDates = (fiche.experiences || []).some((x) => !x.debut)
-  return `${dureeLisible(fiche.annees_experience)} d'expérience, calculés à partir des dates du CV.`
-    + (sansDates ? ' Les expériences sans dates ne sont pas comptées.' : '')
+  return fiche.age ?? null
 }
 
-function Bloc({ titre, children }) {
+// « Conseiller Clientèle chez Prudential Belife (4 mois) »
+function texteExperience(x) {
+  let texte = x.poste + (x.entreprise ? ` chez ${x.entreprise}` : '')
+  if (x.duree != null) texte += ` (${dureeLisible(x.duree)})`
+  else if (x.periode) texte += ` (${x.periode})`
+  return texte
+}
+
+function Ligne({ titre, children }) {
   return (
-    <section className="mt-6">
-      <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">{titre}</h3>
-      {children}
-    </section>
+    <p className="py-1.5">
+      <span className="font-semibold">{titre} : </span>
+      <span className="text-slate-700">{children}</span>
+    </p>
   )
 }
 
-function Depot({ onFichier, erreur }) {
+// La carte du CV : une ligne par rubrique, seulement celles qui sont dans le CV
+function CarteCv({ fiche, profil }) {
+  const age = ageDe(fiche)
+  const entete = [fiche.titre, fiche.localisation || profil.lieu_residence, age != null && `${age} ans`].filter(Boolean)
+  const contact = [fiche.telephone, fiche.email].filter(Boolean)
+  const experiences = fiche.experiences || []
   return (
-    <div className="rounded-2xl border-2 border-dashed border-slate-300 bg-white p-10 text-center">
-      <p className="text-lg font-medium">Déposez votre CV</p>
-      <p className="mt-1 text-sm text-slate-500">PDF ou Word (.docx), {TAILLE_MAX_MO} Mo maximum</p>
-      <label className="mt-6 inline-block cursor-pointer rounded-lg bg-principal px-5 py-2.5 font-medium text-white hover:bg-principal-fonce">
-        Choisir un fichier
-        <input type="file" accept=".pdf,.docx" className="hidden" onChange={(e) => { e.target.files[0] && onFichier(e.target.files[0]); e.target.value = '' }} />
-      </label>
-      {erreur && <p className="mx-auto mt-4 max-w-md rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{erreur}</p>}
+    <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h2 className="text-xl font-bold">{profil.prenom} {profil.nom}</h2>
+      {entete.length > 0 && <p className="text-slate-600">{entete.join(', ')}</p>}
+      <div className="mt-4 divide-y divide-slate-100">
+        {fiche.resume && <Ligne titre="Résumé">{fiche.resume}</Ligne>}
+        {contact.length > 0 && <Ligne titre="Contact">{contact.join(', ')}</Ligne>}
+        {(fiche.liens || []).length > 0 && (
+          <Ligne titre="Liens">
+            {fiche.liens.map((l, i) => (
+              <span key={l.url}>{i > 0 && ', '}
+                <a href={l.url} target="_blank" rel="noreferrer" className="text-principal underline">{l.url.replace(/^https?:\/\//, '')}</a>
+              </span>
+            ))}
+          </Ligne>
+        )}
+        {experiences.length > 0 && <Ligne titre="Expériences">{experiences.map(texteExperience).join(', ')}</Ligne>}
+        {(fiche.rubriques || []).map((r) => <Ligne key={r.titre} titre={r.titre}>{r.contenu}</Ligne>)}
+      </div>
     </div>
   )
 }
 
-// La fiche : modifiable (aperçu avant publication, ou modification) ou en lecture
-function Fiche({ fiche, modifiable, modifs, setModifs }) {
-  const changer = (cle) => (e) => setModifs({ ...modifs, [cle]: e.target.value })
-  const valeur = (cle) => (modifiable ? modifs[cle] : fiche[cle]) || ''
+// La zone de dépôt : un clic ou un glisser-déposer
+function Depot({ onFichier, dejaUnCv, occupe, champFichier }) {
+  const [survol, setSurvol] = useState(false)
   return (
-    <>
-      <div className="mt-6 grid gap-3 md:grid-cols-2">
-        {[['prenom', 'Prénom'], ['nom', 'Nom'], ['titre', 'Métier'], ['localisation', 'Localisation'], ['telephone', 'Téléphone'], ['email', 'E-mail']].map(([cle, label]) => (
-          <label key={cle} className="text-sm text-slate-600">{label}
-            {modifiable
-              ? <input value={valeur(cle)} onChange={changer(cle)} className={`${champ} mt-1 text-slate-900`} />
-              : <p className="mt-1 text-base text-slate-900">{valeur(cle) || 'Non mentionné dans le CV'}</p>}
-          </label>
-        ))}
-      </div>
-      <Bloc titre="Résumé">
-        {modifiable
-          ? <textarea rows={4} value={valeur('resume')} onChange={changer('resume')} className={champ} />
-          : <p className="text-slate-800">{fiche.resume}</p>}
-      </Bloc>
-      <Bloc titre="Compétences">
-        {modifiable
-          ? <input value={modifs.competences_texte ?? (fiche.competences || []).join(', ')} onChange={changer('competences_texte')} className={champ} />
-          : <div className="flex flex-wrap gap-2">{(fiche.competences || []).map((c) => <span key={c} className="rounded-full bg-slate-100 px-3 py-1 text-sm">{c}</span>)}</div>}
-      </Bloc>
-
-      <Bloc titre="Expérience">
-        <p className="mb-2 text-slate-700">{texteExperience(fiche)}</p>
-        <ul className="space-y-2">
-          {(fiche.experiences || []).map((x, i) => (
-            <li key={i}><span className="font-medium">{x.poste}</span>{x.entreprise && ` · ${x.entreprise}`}
-              <span className="text-slate-500"> · {periodeLisible(x)}</span></li>
-          ))}
-        </ul>
-      </Bloc>
-      {(fiche.formations || []).length > 0 && (
-        <Bloc titre="Formation">
-          <ul className="space-y-1">{fiche.formations.map((f, i) => (
-            <li key={i}>{f.diplome}{f.ecole && ` · ${f.ecole}`}<span className="text-slate-500"> · {periodeLisible(f)}</span></li>
-          ))}</ul>
-        </Bloc>
-      )}
-      {(fiche.certifications || []).length > 0 && (
-        <Bloc titre="Certifications"><ul className="space-y-1">{fiche.certifications.map((c) => <li key={c}>{c}</li>)}</ul></Bloc>
-      )}
-      {(fiche.projets || []).length > 0 && (
-        <Bloc titre="Projets">
-          <ul className="space-y-1">{fiche.projets.map((p, i) => (
-            <li key={i}><span className="font-medium">{p.nom}</span>{p.description && ` : ${p.description}`}
-              {p.lien && <span className="text-principal"> · {p.lien.replace(/^https?:\/\//, '')}</span>}</li>
-          ))}</ul>
-        </Bloc>
-      )}
-      {(fiche.liens || []).length > 0 && (
-        <Bloc titre="Liens">
-          <div className="flex flex-wrap gap-2">{fiche.liens.map((l) => (
-            <a key={l.url} href={l.url} target="_blank" rel="noreferrer" className="rounded-full bg-blue-50 px-3 py-1 text-sm text-principal">{l.url.replace(/^https?:\/\//, '')}</a>
-          ))}</div>
-        </Bloc>
-      )}
-      {(fiche.langues || []).length > 0 && <Bloc titre="Langues"><p>{fiche.langues.join(' · ')}</p></Bloc>}
-      {(fiche.autres_infos || []).length > 0 && <Bloc titre="Autres informations"><p>{fiche.autres_infos.join(' · ')}</p></Bloc>}
-    </>
+    <label
+      onDragOver={(e) => { e.preventDefault(); setSurvol(true) }}
+      onDragLeave={() => setSurvol(false)}
+      onDrop={(e) => { e.preventDefault(); setSurvol(false); if (!occupe && e.dataTransfer.files[0]) onFichier(e.dataTransfer.files[0]) }}
+      className={`block rounded-2xl border-2 border-dashed p-8 text-center transition ${occupe ? 'cursor-wait opacity-60' : 'cursor-pointer hover:border-principal'} ${survol ? 'border-principal bg-blue-50' : 'border-slate-300 bg-white'}`}>
+      <p className="text-lg font-medium">{dejaUnCv ? 'Redéposer mon CV' : 'Déposez votre CV'}</p>
+      <p className="mt-1 text-sm text-slate-500">
+        {dejaUnCv ? 'Cliquez ici ou glissez un nouveau fichier : il sera analysé à nouveau.' : 'Cliquez ici ou glissez votre fichier.'}
+        {` PDF ou Word (.docx), ${TAILLE_MAX_MO} Mo maximum.`}
+      </p>
+      <input ref={champFichier} type="file" accept=".pdf,.docx" className="hidden" disabled={occupe}
+        onChange={(e) => { if (e.target.files[0]) onFichier(e.target.files[0]); e.target.value = '' }} />
+    </label>
   )
 }
 
 export default function EspaceCandidat({ profil }) {
-  const [etat, setEtat] = useState('chargement')   // chargement | depot | preparation | apercu | publication | publiee
-  const [cv, setCv] = useState(null)               // le CV publié (s'il existe)
-  const [fichier, setFichier] = useState(null)     // le nouveau fichier déposé, pas encore publié
-  const [texte, setTexte] = useState('')           // son texte extrait
-  const [fiche, setFiche] = useState(null)
-  const [fichePubliee, setFichePubliee] = useState(null)   // la fiche du CV publié, gardée si on annule
-  const [modifs, setModifs] = useState({})
-  const [modification, setModification] = useState(false)   // modifier une fiche déjà publiée
+  const [chargement, setChargement] = useState(true)
+  const [cv, setCv] = useState(null)                  // le CV publié (s'il existe)
+  const [fichePubliee, setFichePubliee] = useState(null)
+  const [apercu, setApercu] = useState(null)          // la fiche du CV déposé, pas encore publiée
+  const [fichier, setFichier] = useState(null)        // le fichier déposé, pas encore publié
+  const [texte, setTexte] = useState('')              // son texte extrait
+  const [occupe, setOccupe] = useState('')            // '' | 'lecture' | 'publication'
   const [erreur, setErreur] = useState('')
   const [message, setMessage] = useState('')
+  const champFichier = useRef(null)
 
   // Au chargement : le CV publié du candidat et sa fiche, s'il en a un
   useEffect(() => {
@@ -145,128 +119,104 @@ export default function EspaceCandidat({ profil }) {
       const { data: actif } = await supabase.from('cvs').select('*').eq('candidat_id', profil.id).eq('actif', true).maybeSingle()
       if (actif) {
         const { data } = await supabase.from('fiches_cv').select('*').eq('cv_id', actif.id).maybeSingle()
-        if (data) { setCv(actif); setFiche(data); setFichePubliee(data); return setEtat('publiee') }
+        if (data) { setCv(actif); setFichePubliee(data) }
       }
-      setEtat('depot')
+      setChargement(false)
     }
     charger()
   }, [profil.id])
 
-  // 1 et 2. Déposer : extraire le texte, puis l'IA prépare la fiche (rien n'est enregistré)
+  // Déposer : extraire le texte, puis l'IA analyse le CV (rien n'est enregistré)
   async function deposer(nouveau) {
     setErreur(''); setMessage('')
-    const type = typeDuFichier(nouveau)
-    if (!type) return setErreur('Format non accepté : déposez un PDF ou un fichier Word (.docx).')
+    if (!typeDuFichier(nouveau)) return setErreur('Format non accepté : déposez un PDF ou un fichier Word (.docx).')
     if (nouveau.size > TAILLE_MAX_MO * 1024 * 1024) return setErreur(`Fichier trop lourd : ${TAILLE_MAX_MO} Mo maximum.`)
-    setEtat('preparation')
+    setOccupe('lecture')
     try {
       const extrait = await extraireTexte(nouveau)
       if (extrait.length < 50) throw new Error("Nous n'avons pas pu lire de texte dans ce fichier. S'il s'agit d'un scan (une image), déposez un PDF texte ou un Word.")
-      const { fiche: preparee } = await appelerServeur('/preparer-cv', { texte: extrait })
-      setFichier(nouveau); setTexte(extrait)
-      setFiche(preparee); setModifs(preparee); setEtat('apercu')
+      const { fiche } = await appelerServeur('/preparer-cv', { texte: extrait })
+      setFichier(nouveau); setTexte(extrait); setApercu(fiche)
     } catch (e) {
-      setErreur(e.message); setEtat('depot')
+      setErreur(e.message)
     }
+    setOccupe('')
   }
 
-  // La fiche relue par le candidat, avec ses corrections
-  function ficheRelue() {
-    const relue = { ...fiche, ...modifs }
-    relue.competences = String(modifs.competences_texte ?? (fiche.competences || []).join(', '))
-      .split(',').map((c) => c.trim()).filter(Boolean)
-    delete relue.competences_texte
-    return relue
-  }
-
-  // 3. Publier : le fichier, la ligne du CV, puis le serveur enregistre tout et supprime l'ancien CV
+  // Publier : le fichier, la ligne du CV, puis le serveur enregistre tout et supprime l'ancien CV
   async function publier() {
-    setErreur(''); setMessage(''); setEtat('publication')
+    setErreur(''); setMessage(''); setOccupe('publication')
     try {
       const nomPropre = fichier.name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.-]+/g, '_')
       const chemin = `${profil.id}/${Date.now()}_${nomPropre}`
       const envoi = await supabase.storage.from('cvs').upload(chemin, fichier, { contentType: fichier.type || undefined })
-      if (envoi.error) throw new Error("L'envoi du fichier a échoué.")
+      if (envoi.error) throw new Error(`L'envoi du fichier a échoué : ${envoi.error.message}`)
       const { data: nouveau, error } = await supabase.from('cvs').insert({
         candidat_id: profil.id, nom_fichier: fichier.name, type_fichier: typeDuFichier(fichier), taille: fichier.size,
         chemin_stockage: chemin, texte_complet: texte, actif: false,
       }).select().single()
-      if (error) { await supabase.storage.from('cvs').remove([chemin]); throw new Error("L'enregistrement du CV a échoué.") }
-      const { fiche: publiee } = await appelerServeur('/publier-cv', { cv_id: nouveau.id, fiche: ficheRelue() })
-      setCv({ ...nouveau, actif: true }); setFiche(publiee); setFichePubliee(publiee); setFichier(null); setTexte('')
-      setEtat('publiee'); setMessage('Votre CV est publié : les recruteurs peuvent maintenant vous trouver.')
-    } catch (e) {
-      setErreur(e.message); setEtat('apercu')
-    }
-  }
-
-  // 4. Modifier une fiche déjà publiée (le CV ne change pas)
-  async function enregistrerModifications() {
-    setErreur(''); setMessage('')
-    try {
-      const { fiche: publiee } = await appelerServeur('/publier-cv', { cv_id: cv.id, fiche: ficheRelue() })
-      setFiche(publiee); setFichePubliee(publiee); setModification(false); setMessage('Vos modifications sont enregistrées.')
+      if (error) { await supabase.storage.from('cvs').remove([chemin]); throw new Error(`L'enregistrement du CV a échoué : ${error.message}`) }
+      const { fiche } = await appelerServeur('/publier-cv', { cv_id: nouveau.id, fiche: apercu })
+      setCv({ ...nouveau, actif: true }); setFichePubliee(fiche)
+      setApercu(null); setFichier(null); setTexte('')
+      setMessage('Votre CV est publié : les recruteurs peuvent maintenant vous trouver.')
     } catch (e) {
       setErreur(e.message)
     }
+    setOccupe('')
   }
 
-  if (etat === 'chargement') return <p className="py-24 text-center text-slate-500">Chargement…</p>
-  if (etat === 'preparation' || etat === 'publication') {
-    return (
-      <div className="rounded-2xl bg-white p-12 text-center shadow-sm">
-        <p className="text-lg font-medium">{etat === 'preparation' ? 'Lecture de votre CV…' : 'Publication de votre CV…'}</p>
-        <p className="mt-2 text-slate-500">{etat === 'preparation' ? "L'IA prépare votre fiche (quelques secondes)." : 'Enregistrement de votre fiche.'}</p>
-      </div>
-    )
-  }
-  if (etat === 'depot') {
-    return (
-      <div>
-        <h1 className="mb-6 text-2xl font-bold">Bonjour {profil.prenom} 👋</h1>
-        <Depot onFichier={deposer} erreur={erreur} />
-        {cv && <button onClick={() => { setErreur(''); setEtat('publiee') }} className="mt-4 text-sm text-principal underline">Revenir à mon CV publié</button>}
-      </div>
-    )
+  function annuler() {
+    setApercu(null); setFichier(null); setTexte(''); setErreur(''); setMessage('')
   }
 
-  const enApercu = etat === 'apercu'
-  const modifiable = enApercu || modification
+  if (chargement) return <p className="py-24 text-center text-slate-500">Chargement…</p>
+
   return (
-    <div className="rounded-2xl bg-white p-6 shadow-sm md:p-8">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">{enApercu ? 'Voici ce que nous avons compris de votre CV' : 'Mon CV publié'}</h1>
-          <p className="mt-1 text-slate-500">
-            {enApercu
-              ? "Rien n'est encore enregistré. Relisez, corrigez si besoin, puis publiez : c'est cette fiche que verront les recruteurs."
-              : 'Voici la fiche que voient les recruteurs.'}
+    <div>
+      <h1 className="mb-6 text-2xl font-bold">Bonjour {profil.prenom}</h1>
+
+      {/* 1. La zone de dépôt, toujours visible */}
+      <Depot onFichier={deposer} dejaUnCv={Boolean(cv || apercu)} occupe={Boolean(occupe)} champFichier={champFichier} />
+
+      {occupe && (
+        <p className="mt-6 rounded-lg bg-blue-50 px-4 py-3 text-principal-fonce">
+          {occupe === 'lecture' ? "Lecture de votre CV : l'IA l'analyse (quelques secondes)…" : 'Publication de votre CV…'}
+        </p>
+      )}
+      {erreur && <p className="mt-6 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{erreur}</p>}
+      {message && <p className="mt-6 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">{message}</p>}
+
+      {/* 2. Le CV déposé, pas encore publié */}
+      {apercu && !occupe && (
+        <section className="mt-8">
+          <h2 className="text-lg font-semibold">Voici ce que nous avons compris de votre CV</h2>
+          <p className="text-sm text-slate-500">
+            Rien n'est encore enregistré. Si c'est juste, publiez-le. Sinon, redéposez votre CV : il sera analysé à nouveau.
           </p>
-        </div>
-        {!enApercu && <span className="rounded-full bg-green-100 px-3 py-1 text-sm font-medium text-green-800">✓ Publié</span>}
-      </div>
+          <CarteCv fiche={apercu} profil={profil} />
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button onClick={publier} className={bouton}>Publier mon CV</button>
+            <button onClick={annuler} className={boutonClair}>Annuler</button>
+          </div>
+        </section>
+      )}
 
-      <Fiche fiche={fiche} modifiable={modifiable} modifs={modifs} setModifs={setModifs} />
-
-      {erreur && <p className="mt-6 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{erreur}</p>}
-      {message && <p className="mt-6 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">{message}</p>}
-
-      <div className="mt-8 flex flex-wrap gap-3">
-        {enApercu && <>
-          <button onClick={publier} className="rounded-lg bg-principal px-5 py-2.5 font-medium text-white hover:bg-principal-fonce">Publier mon CV</button>
-          <button onClick={() => { setErreur(''); setFichier(null); setFiche(fichePubliee); setEtat(cv ? 'publiee' : 'depot') }}
-            className="rounded-lg border border-slate-300 px-5 py-2.5 hover:bg-slate-50">Annuler</button>
-        </>}
-        {!enApercu && !modification && <>
-          <button onClick={() => { setModifs(fiche); setModification(true); setMessage('') }} className="rounded-lg bg-principal px-5 py-2.5 font-medium text-white hover:bg-principal-fonce">Modifier ma fiche</button>
-          <button onClick={() => ouvrirCv(cv.chemin_stockage).catch((e) => setErreur(e.message))} className="rounded-lg border border-slate-300 px-5 py-2.5 hover:bg-slate-50">Voir mon CV</button>
-          <button onClick={() => { setErreur(''); setMessage(''); setEtat('depot') }} className="rounded-lg border border-slate-300 px-5 py-2.5 hover:bg-slate-50">Mettre à jour mon CV</button>
-        </>}
-        {modification && <>
-          <button onClick={enregistrerModifications} className="rounded-lg bg-principal px-5 py-2.5 font-medium text-white hover:bg-principal-fonce">Enregistrer les modifications</button>
-          <button onClick={() => { setModification(false); setModifs(fiche) }} className="rounded-lg border border-slate-300 px-5 py-2.5 hover:bg-slate-50">Annuler</button>
-        </>}
-      </div>
+      {/* 3. Le CV publié */}
+      {!apercu && cv && fichePubliee && !occupe && (
+        <section className="mt-8">
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="text-lg font-semibold">Mon CV publié</h2>
+            <span className="rounded-full bg-green-100 px-3 py-1 text-sm font-medium text-green-800">Publié</span>
+          </div>
+          <p className="text-sm text-slate-500">Les recruteurs vous trouvent grâce à tout le contenu de votre CV.</p>
+          <CarteCv fiche={fichePubliee} profil={profil} />
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button onClick={() => ouvrirCv(cv.chemin_stockage).catch((e) => setErreur(e.message))} className={bouton}>Voir mon CV</button>
+            <button onClick={() => champFichier.current?.click()} className={boutonClair}>Mettre à jour mon CV</button>
+          </div>
+        </section>
+      )}
     </div>
   )
 }

@@ -14,11 +14,43 @@ export function typeDuFichier(fichier) {
   return ['pdf', 'docx'].includes(extension) ? extension : null
 }
 
-// Les morceaux de texte d'un PDF ne sont pas rangés dans l'ordre de lecture : on reconstruit les lignes
-// d'après leur position sur la page (même hauteur = même ligne, de gauche à droite).
-// Ainsi, un poste et ses dates alignées à droite restent sur la même ligne, comme à l'écran.
-const TOLERANCE_LIGNE = 3     // écart de hauteur toléré pour deux morceaux de la même ligne
-const ECART_COLONNE = 20      // au-delà, deux morceaux d'une ligne sont séparés par « | » (deux colonnes)
+// Le texte brut du PDF, dans l'ordre où il est rangé dans le fichier (colonne par colonne) : on ne refait pas la mise en page.
+// Un seul correctif : un court élément écrit à droite d'une ligne (une date, un outil) est souvent rangé ailleurs
+// dans le fichier ; on le recolle au bout de sa ligne, sinon on ne saurait plus à quel poste appartient une date.
+const LONGUEUR_COURTE = 40    // un élément « court » : une date, un outil
+const TOLERANCE_HAUTEUR = 3   // même hauteur sur la page = même ligne
+
+function lignesDeLaPage(items) {
+  const lignes = []
+  let courante = null
+  for (const item of items) {
+    if (!courante) courante = { texte: '', x: item.transform[4], y: item.transform[5], fin: 0 }
+    courante.texte += item.str
+    courante.fin = Math.max(courante.fin, item.transform[4] + item.width)
+    if (item.hasEOL) { lignes.push(courante); courante = null }
+  }
+  if (courante) lignes.push(courante)
+  return lignes.filter((l) => l.texte.trim())
+}
+
+const aDuTexte = (l) => /[\p{L}\p{N}]/u.test(l.texte)
+const estUnTitre = (l) => /\p{L}{2}/u.test(l.texte) && l.texte === l.texte.toUpperCase()   // « FORMATION », « PROJETS »
+
+function recollerLesElementsCourts(lignes) {
+  lignes.forEach((l, i) => { l.rang = i })
+  for (const courte of lignes) {
+    if (courte.texte.trim().length > LONGUEUR_COURTE || !aDuTexte(courte) || estUnTitre(courte)) continue
+    // Sa ligne : à la même hauteur, juste à sa gauche, et rangée APRÈS elle dans le fichier
+    // (un élément rangé à sa place normale, dans l'ordre de lecture, n'est pas déplacé)
+    const voisines = lignes.filter((l) => l !== courte && !l.recollee && aDuTexte(l) && l.rang > courte.rang
+      && Math.abs(l.y - courte.y) <= TOLERANCE_HAUTEUR && l.fin <= courte.x + 2)
+    if (!voisines.length) continue
+    const voisine = voisines.reduce((a, b) => (b.fin > a.fin ? b : a))   // la plus proche à gauche
+    voisine.texte += ` — ${courte.texte.trim()}`
+    courte.recollee = true
+  }
+  return lignes.filter((l) => !l.recollee).map((l) => l.texte)
+}
 
 async function textePdf(contenu) {
   const document = await pdfjs.getDocument({ data: contenu }).promise
@@ -27,28 +59,7 @@ async function textePdf(contenu) {
   for (let numero = 1; numero <= document.numPages; numero++) {
     const page = await document.getPage(numero)
     const { items } = await page.getTextContent()
-    const morceaux = items
-      .filter((item) => item.str && item.str.trim())
-      .map((item) => ({ texte: item.str, x: item.transform[4], y: item.transform[5], largeur: item.width }))
-    // Regrouper par hauteur (y), du haut vers le bas de la page
-    const groupes = []
-    for (const m of morceaux.sort((a, b) => b.y - a.y)) {
-      const groupe = groupes.find((g) => Math.abs(g.y - m.y) <= TOLERANCE_LIGNE)
-      if (groupe) groupe.morceaux.push(m)
-      else groupes.push({ y: m.y, morceaux: [m] })
-    }
-    for (const groupe of groupes.sort((a, b) => b.y - a.y)) {
-      let ligne = '', finPrecedente = null
-      for (const m of groupe.morceaux.sort((a, b) => a.x - b.x)) {
-        if (finPrecedente !== null) {
-          const ecart = m.x - finPrecedente
-          ligne += ecart > ECART_COLONNE ? ' | ' : (ligne.endsWith(' ') || m.texte.startsWith(' ') || ecart < 1 ? '' : ' ')
-        }
-        ligne += m.texte
-        finPrecedente = m.x + m.largeur
-      }
-      lignes.push(ligne)
-    }
+    lignes.push(...recollerLesElementsCourts(lignesDeLaPage(items)))
     // Les liens cliquables cachés derrière un mot (ex. « GitHub ») : on ajoute leur adresse au texte
     for (const annotation of await page.getAnnotations()) {
       const url = annotation.url || annotation.unsafeUrl
@@ -67,10 +78,11 @@ async function texteDocx(contenu) {
   return resultat.value + (liens.length ? `\nLiens : ${liens.join(' ')}` : '')
 }
 
-// Retire les puces et les symboles décoratifs, et les espaces en trop ; garde une information par ligne
+// Retire les puces, les emojis et les symboles décoratifs, et les espaces en trop ; garde une information par ligne
 export function nettoyerTexte(texte) {
   return texte
     .replace(/[•▪●■□◆◇○◦➢➤►▶✓✔☐☑★☆→⇒➔✦✧❖]/g, ' ')
+    .replace(/\p{Extended_Pictographic}\uFE0F?/gu, ' ')     // les emojis (📍 📞 ✉️…)
     .split('\n')
     .map((ligne) => ligne.replace(/[ \t ]+/g, ' ').trim())
     .filter(Boolean)
