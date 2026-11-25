@@ -289,3 +289,26 @@ create policy "Le candidat lit ses fichiers" on storage.objects
 
 create policy "Le recruteur ouvre les CV" on storage.objects
   for select using (bucket_id = 'cvs' and public.est_recruteur());
+
+-- ════════════════════════════════════════════════════════════════
+--  Partie 5 : la recherche par le sens (utilisée seulement par le serveur Python)
+-- ════════════════════════════════════════════════════════════════
+
+-- Les passages de CV les plus proches d'une demande (le « sens » le plus proche en premier).
+-- Seuls les CV actifs sont cherchés.
+create or replace function public.passages_proches(vecteur vector(384), nombre int default 40)
+returns table (cv_id bigint, contenu text, similarite double precision)
+language sql stable
+set search_path = public, extensions
+as $$
+  select m.cv_id, m.contenu, 1 - (m.embedding <=> vecteur) as similarite
+  from public.cv_morceaux m
+  join public.cvs c on c.id = m.cv_id
+  where c.actif and m.embedding is not null
+  order by m.embedding <=> vecteur
+  limit nombre;
+$$;
+
+-- Réservée au serveur (clé de service) : le site ne peut pas l'appeler
+revoke execute on function public.passages_proches(vector, int) from public, anon, authenticated;
+grant execute on function public.passages_proches(vector, int) to service_role;

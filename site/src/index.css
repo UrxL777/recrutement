@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* Les couleurs du site (à retravailler à la fin) */
+@theme {
+  --color-principal: #1d4ed8;        /* bleu : boutons, liens */
+  --color-principal-fonce: #1e3a8a;  /* bleu nuit : survol, titres */
+  --color-fond: #f8fafc;             /* gris très clair : fond des pages */
+}
+
+body {
+  background-color: var(--color-fond);
+}

@@ -4,7 +4,7 @@ RecrutSmart : le service IA (FastAPI), le chef d'orchestre
 - routes :
     /sante        vérifie que le serveur, Supabase et Groq répondent
     /analyser-cv  appelée par le site juste après le dépôt d'un CV (analyse.py)
-    /rechercher   la recherche des recruteurs (recherche.py, à venir)
+    /rechercher   la recherche des recruteurs, avec l'agent qui affine (recherche.py)
 """
 import json
 import os
@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from supabase import create_client
 
 import analyse
+import recherche
 
 # ─── Les clés, lues dans le fichier .env (jamais écrites dans le code) ───
 load_dotenv()
@@ -72,6 +73,10 @@ class DemandeAnalyse(BaseModel):
     cv_id: int
 
 
+class DemandeRecherche(BaseModel):
+    messages: list[str]     # la demande du recruteur, puis ses précisions successives
+
+
 @app.get("/sante")
 def sante():
     """Vérifie que tout répond : le serveur, Supabase et Groq (aucun token consommé)."""
@@ -101,3 +106,19 @@ def analyser_cv(demande: DemandeAnalyse, authorization: str | None = Header(defa
     except ValueError as erreur:
         raise HTTPException(status_code=422, detail=str(erreur))
     return {"fiche": fiche}
+
+
+@app.post("/rechercher")
+def rechercher(demande: DemandeRecherche, authorization: str | None = Header(default=None)):
+    """
+    La recherche d'un recruteur, en langage naturel.
+    Le site envoie la demande et les précisions (la conversation avec l'agent, gardée dans le navigateur).
+    """
+    recruteur_id = utilisateur_connecte(authorization)
+    profil = supabase.table("profils").select("role").eq("id", recruteur_id).maybe_single().execute()
+    if not profil or not profil.data or profil.data["role"] != "recruteur":
+        raise HTTPException(status_code=403, detail="La recherche est réservée aux recruteurs.")
+    messages = [m.strip()[:500] for m in demande.messages if m.strip()][-10:]
+    if not messages:
+        raise HTTPException(status_code=422, detail="Écrivez ce que vous recherchez.")
+    return recherche.rechercher(messages, supabase, demander_ia)
