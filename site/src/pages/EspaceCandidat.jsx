@@ -10,6 +10,23 @@ import { extraireTexte, TAILLE_MAX_MO, typeDuFichier } from '../extraction'
 const champ = 'w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-principal focus:outline-none'
 const CHAMPS_MODIFIABLES = ['prenom', 'nom', 'titre', 'localisation', 'telephone', 'email', 'resume']
 
+// La période d'une expérience ou d'une formation, en phrase claire (jamais de « ? »)
+function periodeLisible(x) {
+  if (x.periode) return x.periode                       // telle qu'écrite dans le CV
+  if (x.debut && x.fin) return `${x.debut} – ${x.fin}`
+  if (x.debut) return `Depuis ${x.debut} (date de fin non précisée dans le CV)`
+  return 'Dates non mentionnées dans le CV'
+}
+
+function texteExperience(fiche) {
+  const sansDates = (fiche.experiences || []).some((x) => !x.debut)
+  if (fiche.annees_experience == null) {
+    return "Années d'expérience non calculées : les dates des expériences ne sont pas mentionnées dans le CV."
+  }
+  return `${String(fiche.annees_experience).replace('.', ',')} an(s) d'expérience, calculés à partir des dates du CV.`
+    + (sansDates ? ' Les expériences sans dates ne sont pas comptées.' : '')
+}
+
 function Bloc({ titre, children }) {
   return (
     <section className="mt-6">
@@ -150,20 +167,23 @@ export default function EspaceCandidat({ profil }) {
       </label>
 
       <Bloc titre="Expérience">
-        <p className="mb-2 text-slate-700">
-          {fiche.annees_experience != null ? `${String(fiche.annees_experience).replace('.', ',')} an(s) d'expérience (calculés à partir des dates de votre CV)` : "Années d'expérience non calculées (dates absentes du CV)"}
-        </p>
+        <p className="mb-2 text-slate-700">{texteExperience(fiche)}</p>
         <ul className="space-y-2">
           {(fiche.experiences || []).map((x, i) => (
             <li key={i}><span className="font-medium">{x.poste}</span>{x.entreprise && ` · ${x.entreprise}`}
-              <span className="text-slate-500"> ({x.debut || '?'} → {x.fin || '?'})</span></li>
+              <span className="text-slate-500"> · {periodeLisible(x)}</span></li>
           ))}
         </ul>
       </Bloc>
       {(fiche.formations || []).length > 0 && (
         <Bloc titre="Formation">
-          <ul className="space-y-1">{fiche.formations.map((f, i) => <li key={i}>{f.diplome}{f.ecole && ` · ${f.ecole}`}</li>)}</ul>
+          <ul className="space-y-1">{fiche.formations.map((f, i) => (
+            <li key={i}>{f.diplome}{f.ecole && ` · ${f.ecole}`}<span className="text-slate-500"> · {periodeLisible(f)}</span></li>
+          ))}</ul>
         </Bloc>
+      )}
+      {(fiche.certifications || []).length > 0 && (
+        <Bloc titre="Certifications"><ul className="space-y-1">{fiche.certifications.map((c) => <li key={c}>{c}</li>)}</ul></Bloc>
       )}
       {(fiche.projets || []).length > 0 && (
         <Bloc titre="Projets">
