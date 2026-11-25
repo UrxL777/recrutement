@@ -14,18 +14,40 @@ export function typeDuFichier(fichier) {
   return ['pdf', 'docx'].includes(extension) ? extension : null
 }
 
+// Les morceaux de texte d'un PDF ne sont pas rangés dans l'ordre de lecture : on reconstruit les lignes
+// d'après leur position sur la page (même hauteur = même ligne, de gauche à droite).
+// Ainsi, un poste et ses dates alignées à droite restent sur la même ligne, comme à l'écran.
+const TOLERANCE_LIGNE = 3     // écart de hauteur toléré pour deux morceaux de la même ligne
+const ECART_COLONNE = 20      // au-delà, deux morceaux d'une ligne sont séparés par « | » (deux colonnes)
+
 async function textePdf(contenu) {
   const document = await pdfjs.getDocument({ data: contenu }).promise
   const lignes = []
   for (let numero = 1; numero <= document.numPages; numero++) {
     const page = await document.getPage(numero)
     const { items } = await page.getTextContent()
-    let ligne = ''
-    for (const item of items) {
-      if (item.str) ligne += (ligne && !ligne.endsWith(' ') && !item.str.startsWith(' ') ? ' ' : '') + item.str
-      if (item.hasEOL) { lignes.push(ligne); ligne = '' }
+    const morceaux = items
+      .filter((item) => item.str && item.str.trim())
+      .map((item) => ({ texte: item.str, x: item.transform[4], y: item.transform[5], largeur: item.width }))
+    // Regrouper par hauteur (y), du haut vers le bas de la page
+    const groupes = []
+    for (const m of morceaux.sort((a, b) => b.y - a.y)) {
+      const groupe = groupes.find((g) => Math.abs(g.y - m.y) <= TOLERANCE_LIGNE)
+      if (groupe) groupe.morceaux.push(m)
+      else groupes.push({ y: m.y, morceaux: [m] })
     }
-    if (ligne) lignes.push(ligne)
+    for (const groupe of groupes.sort((a, b) => b.y - a.y)) {
+      let ligne = '', finPrecedente = null
+      for (const m of groupe.morceaux.sort((a, b) => a.x - b.x)) {
+        if (finPrecedente !== null) {
+          const ecart = m.x - finPrecedente
+          ligne += ecart > ECART_COLONNE ? ' | ' : (ligne.endsWith(' ') || m.texte.startsWith(' ') || ecart < 1 ? '' : ' ')
+        }
+        ligne += m.texte
+        finPrecedente = m.x + m.largeur
+      }
+      lignes.push(ligne)
+    }
   }
   return lignes.join('\n')
 }

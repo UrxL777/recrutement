@@ -23,13 +23,14 @@ LONGUEUR_MIN_TEXTE = 50       # en dessous, le CV est considéré comme vide (PD
 LONGUEUR_MAX_TEXTE = 15000    # au-delà, la fin du texte n'est pas envoyée à l'IA (limite de tokens)
 TAILLE_PASSAGE = 500          # nombre de caractères visé pour chaque passage
 
-PROMPT_FICHE = """Tu lis le texte d'un CV, extrait d'un fichier PDF ou Word. La mise en page est perdue : les colonnes et les sections peuvent être mélangées.
+PROMPT_FICHE = """Tu lis le texte d'un CV, extrait d'un fichier PDF ou Word. La mise en page est perdue : les colonnes peuvent être mélangées, et le signe « | » sépare deux textes placés côte à côte sur la même ligne (souvent deux colonnes, ou un intitulé et ses dates).
 Remplis la fiche du candidat.
 
 Règles :
 - Recopie uniquement ce qui est écrit dans le CV. Si une information n'y est pas, mets null ou une liste vide. N'invente rien et ne devine rien.
 - Garde les noms des entreprises, des écoles, des outils et des technologies comme ils sont écrits.
-- Les dates sont au format AAAA-MM, ou AAAA si le mois n'est pas écrit. Pour un poste ou une formation en cours, "fin" vaut "aujourd'hui".
+- "debut" et "fin" sont au format AAAA-MM, ou AAAA si le mois n'est pas écrit ; convertis les mois écrits en lettres. Pour un poste ou une formation en cours, "fin" vaut "aujourd'hui". Si la fin n'est pas écrite, "fin" vaut null.
+- "periode" : la période recopiée telle qu'elle est écrite dans le CV, ou null si aucune date n'est écrite.
 - "date_naissance" est au format AAAA-MM-JJ, seulement si elle est écrite dans le CV.
 - "titre" : le métier principal du candidat.
 - "resume" : deux ou trois phrases à la troisième personne qui présentent son métier, son expérience et ses points forts, uniquement à partir du CV.
@@ -38,8 +39,8 @@ Règles :
 Réponds uniquement en JSON :
 {"nom": texte ou null, "prenom": texte ou null, "date_naissance": texte ou null, "email": texte ou null, "telephone": texte ou null,
  "localisation": texte ou null, "titre": texte ou null, "resume": texte,
- "experiences": [{"poste": texte, "entreprise": texte ou null, "debut": texte ou null, "fin": texte ou null, "missions": [texte]}],
- "formations": [{"diplome": texte, "ecole": texte ou null, "debut": texte ou null, "fin": texte ou null}],
+ "experiences": [{"poste": texte, "entreprise": texte ou null, "debut": texte ou null, "fin": texte ou null, "periode": texte ou null, "missions": [texte]}],
+ "formations": [{"diplome": texte, "ecole": texte ou null, "debut": texte ou null, "fin": texte ou null, "periode": texte ou null}],
  "competences": [texte], "langues": [texte], "certifications": [texte],
  "projets": [{"nom": texte, "description": texte ou null, "technologies": [texte], "lien": texte ou null}],
  "autres_infos": [texte]}"""
@@ -48,8 +49,8 @@ Réponds uniquement en JSON :
 # ─── Les contrôles Python ─────────────────────────────────────────────────────
 
 MOTIF_LIEN = re.compile(
-    r"(?:https?://|www\.)[^\s,;()<>\"']+"
-    r"|(?:github\.com|gitlab\.com|linkedin\.com|behance\.net|dribbble\.com|kaggle\.com)/[^\s,;()<>\"']+",
+    r"(?:https?://|www\.)[^\s,;()<>\"'|]+"
+    r"|(?<![@\w.])(?:[\w-]+\.)+(?:com|net|org|io|dev|app|ci|fr|me|site|tech|info)(?:/[^\s,;()<>\"'|]*)?",
     re.IGNORECASE,
 )
 MOTIF_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -173,17 +174,27 @@ def _texte(valeur) -> str | None:
     return t or None
 
 
+def _periode(valeur, texte: str) -> str | None:
+    """La période telle qu'écrite dans le CV ; retirée si elle n'y est pas (l'IA l'aurait inventée)."""
+    periode = _texte(valeur)
+    return periode if periode and _normaliser_espaces(periode) in _normaliser_espaces(texte) else None
+
+
+def _normaliser_espaces(t: str) -> str:
+    return re.sub(r"\s+", " ", (t or "").lower()).replace("–", "-").replace("—", "-")
+
+
 def controler_fiche(brute: dict, texte: str) -> dict:
     """Remet la fiche de l'IA en forme et vérifie ce qui doit être exact."""
     experiences = [
         {"poste": _texte(e.get("poste")), "entreprise": _texte(e.get("entreprise")),
          "debut": _texte(e.get("debut")), "fin": _texte(e.get("fin")),
-         "missions": _liste_textes(e.get("missions"))}
+         "periode": _periode(e.get("periode"), texte), "missions": _liste_textes(e.get("missions"))}
         for e in brute.get("experiences") or [] if isinstance(e, dict) and _texte(e.get("poste"))
     ]
     formations = [
         {"diplome": _texte(f.get("diplome")), "ecole": _texte(f.get("ecole")),
-         "debut": _texte(f.get("debut")), "fin": _texte(f.get("fin"))}
+         "debut": _texte(f.get("debut")), "fin": _texte(f.get("fin")), "periode": _periode(f.get("periode"), texte)}
         for f in brute.get("formations") or [] if isinstance(f, dict) and _texte(f.get("diplome"))
     ]
     liens = liens_du_cv(texte)
