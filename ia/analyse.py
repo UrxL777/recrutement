@@ -36,9 +36,9 @@ Règles :
 - N'invente rien et ne devine rien : seulement ce qui est écrit dans le CV. Une information absente vaut null ou une liste vide.
 - N'oublie rien : chaque information utile du CV doit se retrouver dans la fiche (identité, expériences ou rubriques).
 - "nom" : le nom de famille ; "prenom" : tous les prénoms, tels qu'ils sont écrits.
-- "titre" : le métier du candidat, déduit de l'ensemble du CV (l'intitulé en tête, les compétences, les projets, la formation), formulé comme un intitulé de poste sur une offre d'emploi : il commence par le nom du métier, qui désigne la personne. Jamais un statut (étudiant, apprenant, stagiaire), jamais un simple domaine.
+- "titre" : le métier du candidat, comme sur une offre d'emploi : un nom de métier qui désigne la personne, jamais un statut (étudiant, apprenant, stagiaire), jamais un simple domaine. S'il y a un intitulé en tête du CV, le titre s'écrit « nom de métier + domaines » : le nom de métier se forme à partir du mot d'action écrit dans l'intitulé (développement → développeur, analyse → analyste, gestion → gestionnaire, conseil → conseiller…), et non d'après tes propres déductions ; puis viennent tous les domaines de l'intitulé, sans en oublier aucun. Sans intitulé, déduis le métier de l'ensemble du CV.
 - "date_naissance" au format AAAA-MM-JJ, seulement si elle est écrite. "age" : un nombre, seulement si l'âge est écrit (« 25 ans »).
-- "resume" : trois phrases courtes, 40 mots au plus, rédigées par toi, à la troisième personne : le métier (celui de "titre"), l'expérience, la formation principale et les points forts. Ne recopie pas le paragraphe de présentation du CV. Chaque affirmation doit être exacte : une formation « en cours » est suivie, pas obtenue (n'écris jamais « titulaire » ou « diplômé » pour elle).
+- "resume" : trois phrases courtes et complètes au plus, 50 mots au plus en tout, rédigées par toi à la troisième personne : le métier (celui de "titre"), l'expérience, la formation principale et les points forts. Ne coupe jamais une phrase. Ne recopie pas le paragraphe de présentation du CV. Chaque affirmation doit être exacte : une formation « en cours » est suivie, pas obtenue (jamais « titulaire » ni « diplômé ») ; une formation dont la date de fin est passée est terminée (jamais « suit actuellement »).
 - "experiences" : les emplois et les stages. "debut" et "fin" au format AAAA-MM, ou AAAA si le mois n'est pas écrit ; "fin" vaut "aujourd'hui" pour un poste en cours, null si elle n'est pas écrite. "periode" : la période recopiée telle qu'elle est écrite, ou null.
 - "rubriques" : tout le reste du CV, rangé par sorte d'information, dans cet ordre quand elles existent : formations, diplômes, certifications, projets, compétences, langues, qualités, centres d'intérêt, puis tout ce qui reste (disponibilité, permis, situation familiale, habitudes, religion, et toute autre information). Ne crée une rubrique que si le CV en parle.
   "titre" : le nom court de la rubrique (« Formations », « Projets », « Compétences »…).
@@ -187,6 +187,10 @@ def _prenom(valeur) -> str | None:
     return prenom.title() if prenom and prenom.isupper() else prenom
 
 
+def _majuscule(texte: str | None) -> str | None:
+    return texte[0].upper() + texte[1:] if texte else texte
+
+
 def _periode(valeur, texte: str) -> str | None:
     """La période telle qu'écrite dans le CV ; retirée si elle n'y est pas (l'IA l'aurait inventée)."""
     periode = _texte(valeur)
@@ -222,7 +226,7 @@ def controler_fiche(brute: dict, texte: str) -> dict:
         "email": email_du_cv(_texte(brute.get("email")), texte),
         "telephone": telephone_du_cv(_texte(brute.get("telephone")), texte),
         "localisation": _texte(brute.get("localisation")),
-        "titre": _texte(brute.get("titre")),
+        "titre": _majuscule(_texte(brute.get("titre"))),
         "resume": _texte(brute.get("resume")) or "",
         "experiences": experiences,
         "annees_experience": annees_experience(experiences, texte, aujourd_hui),
@@ -265,11 +269,16 @@ def preparer_fiche(texte: str, demander_ia) -> dict:
     texte = texte.strip()
     if len(texte) < LONGUEUR_MIN_TEXTE:
         raise ValueError("Le texte du CV est vide ou presque : c'est peut-être un PDF scanné (une image).")
-    brute = demander_ia([
-        {"role": "system", "content": PROMPT_FICHE},
-        {"role": "user", "content": texte[:LONGUEUR_MAX_TEXTE]},
-    ], modele=MODELE_ANALYSE)
-    return controler_fiche(brute, texte)
+    consigne = PROMPT_FICHE + f"\n\nNous sommes le {date.today().strftime('%d/%m/%Y')}."   # pour savoir ce qui est passé ou en cours
+    for _ in range(2):
+        brute = demander_ia([
+            {"role": "system", "content": consigne},
+            {"role": "user", "content": texte[:LONGUEUR_MAX_TEXTE]},
+        ], max_tokens=8000, modele=MODELE_ANALYSE)
+        fiche = controler_fiche(brute, texte)
+        if fiche["rubriques"]:            # une fiche sans aucune rubrique est incomplète : on redemande une fois
+            return fiche
+    return fiche
 
 
 # ─── 2. Publier : l'enregistrement, quand le candidat a validé ────────────────
