@@ -109,21 +109,17 @@ create table public.fiches_cv (
   nom                  text,
   prenom               text,
   date_naissance       date,
+  age                  smallint check (age between 16 and 80),   -- seulement si le CV donne l'âge sans la date de naissance
   email                text,
   telephone            text,
   localisation         text,
   -- Le profil
   titre                text,                         -- le métier principal
-  resume               text,                         -- affiché au candidat ET au recruteur
-  experiences          jsonb not null default '[]',  -- [{poste, entreprise, debut, fin, missions}]
+  resume               text,                         -- trois phrases courtes : affiché au candidat ET au recruteur
+  experiences          jsonb not null default '[]',  -- [{poste, entreprise, debut, fin, periode, duree}]
   annees_experience    numeric(5, 2),                -- calculées par Python à partir des dates (2 décimales : les mois justes)
-  formations           jsonb not null default '[]',  -- [{diplome, ecole, debut, fin}]
-  competences          text[] not null default '{}',
-  langues              text[] not null default '{}',
-  certifications       jsonb not null default '[]',
-  projets              jsonb not null default '[]',  -- [{nom, description, technologies, lien}]
   liens                jsonb not null default '[]',  -- [{type, url}] : GitHub, portfolio, LinkedIn…
-  autres_infos         jsonb not null default '{}',  -- loisirs, centres d'intérêt, et tout le reste
+  rubriques            jsonb not null default '[]',  -- tout le reste du CV, par rubrique : [{titre, contenu}]
   valide_par_candidat  boolean not null default false,  -- le candidat a relu et confirmé sa fiche
   analyse_le           timestamptz not null default now()
 );
@@ -319,3 +315,16 @@ grant execute on function public.passages_proches(vector, int) to service_role;
 --  les années d'expérience gardent 2 décimales, pour afficher les mois justes (« 4 mois », pas « 0,3 an »).
 -- ════════════════════════════════════════════════════════════════
 alter table public.fiches_cv alter column annees_experience type numeric(5, 2);
+
+-- ─── Migration (25/11/2026) : la fiche par rubriques ───
+-- Chaque CV est différent : l'IA range tout le reste du CV en rubriques (formations, projets, compétences…).
+alter table public.fiches_cv
+  add column if not exists age smallint check (age between 16 and 80),
+  add column if not exists rubriques jsonb not null default '[]',
+  drop column if exists formations,
+  drop column if exists competences,
+  drop column if exists langues,
+  drop column if exists certifications,
+  drop column if exists projets,
+  drop column if exists autres_infos;
+
