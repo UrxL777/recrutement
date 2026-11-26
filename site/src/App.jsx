@@ -11,6 +11,19 @@ function Chargement({ texte = 'Chargement…' }) {
   return <p className="py-24 text-center text-slate-500">{texte}</p>
 }
 
+// Le profil n'a pas pu être lu : on dit pourquoi, et on permet de réessayer ou de se déconnecter
+function ErreurProfil({ texte, onReessayer }) {
+  return (
+    <div className="mx-auto max-w-md py-24 text-center">
+      <p className="text-slate-700">{texte}</p>
+      <div className="mt-6 flex justify-center gap-3">
+        <button onClick={onReessayer} className="rounded-lg bg-principal px-4 py-2 text-white">Réessayer</button>
+        <button onClick={() => supabase.auth.signOut()} className="rounded-lg border border-slate-300 px-4 py-2">Se déconnecter</button>
+      </div>
+    </div>
+  )
+}
+
 function Entete({ profil }) {
   return (
     <header className="border-b border-slate-200 bg-white">
@@ -33,6 +46,7 @@ export default function App() {
   const [session, setSession] = useState(undefined)   // undefined = on ne sait pas encore
   const [profil, setProfil] = useState(null)
   const [erreurProfil, setErreurProfil] = useState('')
+  const [essai, setEssai] = useState(0)
 
   // 1. Qui est connecté ? (et être prévenu à chaque connexion ou déconnexion)
   useEffect(() => {
@@ -47,8 +61,12 @@ export default function App() {
     setErreurProfil('')
     if (!session) return
     supabase.from('profils').select('*').eq('id', session.user.id).maybeSingle()
-      .then(({ data }) => (data ? setProfil(data) : setErreurProfil('Profil introuvable pour ce compte.')))
-  }, [session])
+      .then(({ data, error }) => {
+        if (error) setErreurProfil(`Votre profil n'a pas pu être lu : ${error.message}`)
+        else if (!data) setErreurProfil('Profil introuvable pour ce compte. Déconnectez-vous, puis reconnectez-vous.')
+        else setProfil(data)
+      })
+  }, [session, essai])
 
   if (session === undefined) return <Chargement />
   if (!session) {
@@ -59,7 +77,7 @@ export default function App() {
       </Routes>
     )
   }
-  if (erreurProfil) return <Chargement texte={erreurProfil} />
+  if (erreurProfil) return <ErreurProfil texte={erreurProfil} onReessayer={() => setEssai(essai + 1)} />
   if (!profil) return <Chargement />
 
   // 3. La bonne page selon le rôle
