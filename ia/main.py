@@ -9,6 +9,8 @@ RecrutSmart : le service IA (FastAPI), le chef d'orchestre
 """
 import json
 import os
+import re
+import time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
@@ -30,13 +32,26 @@ MODELE = "openai/gpt-oss-20b"           # le modèle principal
 MODELE_SECOURS = "qwen/qwen3.8-27b"     # prend le relais si le quota du principal est épuisé
 
 
+def _attente_demandee(erreur) -> float:
+    """Le temps d'attente demandé par Groq quand le quota de la minute est atteint (5 s par défaut, 20 s au plus)."""
+    try:
+        return min(float(erreur.response.headers.get("retry-after")), 20.0)
+    except Exception:
+        m = re.search(r"try again in ([\d.]+)s", str(erreur))
+        return min(float(m.group(1)), 20.0) if m else 5.0
+
+
 def demander_ia(messages: list, max_tokens: int = 4000, modele: str = MODELE) -> dict:
-    """Envoie une demande à l'IA et rend sa réponse en JSON. Passe au modèle de secours si besoin."""
-    principal = modele
-    for modele in (principal, principal, MODELE_SECOURS):   # le modèle principal a droit à un second essai
+    """
+    Envoie une demande à l'IA et rend sa réponse en JSON.
+    Réponse inutilisable ou quota atteint : second essai, puis modèle de secours,
+    puis, si le secours est aussi saturé, on attend le temps demandé par Groq et on réessaie une dernière fois.
+    """
+    essais = (modele, modele, MODELE_SECOURS, modele)
+    for numero, modele_essai in enumerate(essais):
         try:
             reponse = groq.chat.completions.create(
-                model=modele,
+                model=modele_essai,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=0.1,
@@ -48,10 +63,14 @@ def demander_ia(messages: list, max_tokens: int = 4000, modele: str = MODELE) ->
             message = str(erreur).lower()
             quota = any(m in message for m in ("429", "413", "503", "rate limit", "over capacity"))
             json_rate = isinstance(erreur, json.JSONDecodeError) or "validate json" in message
-            if modele == principal and (quota or json_rate):
+            if not (quota or json_rate) or numero == len(essais) - 1:
+                raise
+            if quota and modele_essai == MODELE_SECOURS:
+                attente = _attente_demandee(erreur)
+                print(f"[IA] Quota de la minute atteint : attente de {attente:.0f} s")
+                time.sleep(attente)
+            else:
                 print(f"[IA] Réponse inutilisable ou quota atteint → nouvel essai ({str(erreur)[:100]})")
-                continue
-            raise
 
 
 def utilisateur_connecte(authorization: str | None) -> str:

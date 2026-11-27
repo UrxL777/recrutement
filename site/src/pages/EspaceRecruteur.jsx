@@ -142,7 +142,10 @@ export default function EspaceRecruteur() {
             </form>
           </div>
 
-          {/* 3. Les résultats */}
+          {/* 3. Les résultats (avec un avertissement si l'IA n'a pas pu lire certains CV) */}
+          {resultat.avertissement && (
+            <p className="mt-6 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">{resultat.avertissement}</p>
+          )}
           <h2 className="mt-8 text-lg font-semibold">
             {resultat.resultats.length ? `${resultat.resultats.length} candidat(s) trouvé(s)` : 'Aucun candidat ne correspond à ces critères pour le moment.'}
           </h2>

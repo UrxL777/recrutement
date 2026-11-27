@@ -44,7 +44,7 @@ Pour chaque candidat, tu reçois le texte de son CV. Pour chaque critère, répo
 - "statut" : "trouve" si le CV dit ce que le critère demande, même avec une nuance (« un peu », « parfois ») ; "partiel" seulement pour un niveau plus faible que demandé (une langue en notions quand on demande « courant ») ou une information qui le laisse supposer sans le dire ; "absent" si le CV n'en parle pas, dit le contraire, ou parle d'autre chose ;
 Sois strict : le recruteur veut exactement ce qu'il demande. Un métier voisin ou du même domaine n'est pas le métier demandé (une aide-soignante n'est pas une infirmière) : "absent".
 - "preuve" : la phrase du CV qui justifie ta réponse, recopiée mot pour mot, ou null si le statut est "absent".
-Lis le sens exact : une négation (« ne… pas », « pas du tout », « sans ») ou une information opposée contredit le critère, et le statut est alors "absent". Un mot qui ressemble au critère sans avoir le même sens ne compte pas.
+Lis le sens exact : une négation (« ne… pas », « pas du tout », « sans ») ou une information opposée contredit le critère, et le statut est alors "absent". Un mot qui ressemble au critère sans avoir le même sens ne compte pas. Ne déduis pas un critère d'une information qui ne le prouve pas : ne pas manger de porc ne dit pas si quelqu'un est végétarien ou non.
 Le recruteur peut chercher n'importe quoi, même une information personnelle ou inhabituelle : réponds seulement d'après ce qui est écrit dans le CV.
 Ne te fie qu'au CV et n'invente rien.
 Réponds uniquement en JSON : {"candidats": [{"cv_id": 0, "criteres": [{"critere": "...", "statut": "...", "preuve": null}]}]}"""
@@ -232,9 +232,9 @@ def _liste_de_dicts(valeur, cle: str) -> list:
 def verifier_par_ia(criteres: list, a_verifier: list, demander_ia) -> dict:
     """
     L'IA vérifie les critères « texte » sur les candidats choisis, en lisant leur CV entier.
-    Rend {cv_id: {critère: {statut, preuve}}}. Une preuve absente du CV est retirée.
+    Rend ({cv_id: {critère: {statut, preuve}}}, nombre de candidats non vérifiés). Une preuve absente du CV est retirée.
     """
-    resultats = {}
+    resultats, rates = {}, set()
     noms = [c["critere"] for c in criteres]
     groupes = [a_verifier[d:d + CANDIDATS_PAR_APPEL] for d in range(0, len(a_verifier), CANDIDATS_PAR_APPEL)]
     deja_redemande = False
@@ -247,6 +247,7 @@ def verifier_par_ia(criteres: list, a_verifier: list, demander_ia) -> dict:
                                    {"role": "user", "content": json.dumps(entree, ensure_ascii=False)}])
         except Exception as erreur:      # une réponse ratée ne fait pas échouer toute la recherche
             print(f"[RECHERCHE] vérification ratée pour {len(groupe)} candidat(s) : {str(erreur)[:120]}")
+            rates.update(c["cv_id"] for c in groupe)
             reponse = {}
         textes_cv = {c["cv_id"]: normaliser(c["texte_complet"]) for c in groupe}
         for r in _liste_de_dicts(reponse.get("candidats"), "cv_id"):
@@ -270,12 +271,13 @@ def verifier_par_ia(criteres: list, a_verifier: list, demander_ia) -> dict:
         if oublies and not deja_redemande:
             deja_redemande = True
             groupes.append(oublies)
-    return resultats
+    return resultats, len(rates - set(resultats))
 
 
-def classer(criteres: list, candidats: list, villes: dict, chercher_passages, demander_ia) -> list:
+def classer(criteres: list, candidats: list, villes: dict, chercher_passages, demander_ia) -> tuple:
     """
-    Classe les candidats selon les critères. Rend les candidats qui remplissent au moins un critère.
+    Classe les candidats selon les critères. Rend (les candidats qui remplissent au moins un critère,
+    le nombre de candidats que l'IA n'a pas pu vérifier).
     chercher_passages(vecteur) → [{cv_id, contenu, similarite}] : la recherche par le sens dans la base.
     """
     par_id = {c["cv_id"]: c for c in candidats}
@@ -289,6 +291,7 @@ def classer(criteres: list, candidats: list, villes: dict, chercher_passages, de
     # La présélection, pour chaque critère « texte » : la recherche par le sens (passages proches)
     # et les mots de la demande écrits tels quels dans le CV
     proximite = {cv_id: 0.0 for cv_id in par_id}
+    non_verifies = 0
     if textes:
         for critere, vecteur in zip(textes, calculer_embeddings([c["critere"] for c in textes])):
             meilleure = {}
@@ -302,7 +305,7 @@ def classer(criteres: list, candidats: list, villes: dict, chercher_passages, de
         def promesse(cv_id):
             return sum(POINTS[d["statut"]] for d in details[cv_id].values()) + proximite[cv_id]
         a_verifier = sorted(par_id.values(), key=lambda c: -promesse(c["cv_id"]))
-        verifies = verifier_par_ia(textes, a_verifier[:NB_CANDIDATS_VERIFIES], demander_ia)
+        verifies, non_verifies = verifier_par_ia(textes, a_verifier[:NB_CANDIDATS_VERIFIES], demander_ia)
         for cv_id in details:
             for c in textes:
                 v = verifies.get(cv_id, {}).get(c["critere"], {"statut": "absent", "preuve": None})
@@ -340,7 +343,7 @@ def classer(criteres: list, candidats: list, villes: dict, chercher_passages, de
     resultats.sort(key=lambda r: (-r["score"], -r["ordre"][0], -r["ordre"][1], -r["nb_trouves"]))
     for r in resultats:
         del r["ordre"]
-    return resultats[:NB_RESULTATS]
+    return resultats[:NB_RESULTATS], non_verifies
 
 
 # ─── La recherche complète, avec la base ──────────────────────────────────────
@@ -367,7 +370,7 @@ def rechercher(messages: list, supabase, demander_ia) -> dict:
     criteres, message = decouper_criteres(messages, demander_ia)
     if not criteres:
         return {"message": message or "Je n'ai pas compris ce que vous recherchez. Pouvez-vous reformuler ?",
-                "criteres": [], "resultats": []}
+                "criteres": [], "resultats": [], "avertissement": None}
     candidats = charger_candidats(supabase)
     lieux = supabase.table("lieux_residence").select("nom, ville").execute().data or []
     villes = {normaliser(l["nom"]): normaliser(l["ville"]) for l in lieux}
@@ -375,6 +378,9 @@ def rechercher(messages: list, supabase, demander_ia) -> dict:
     def chercher_passages(vecteur):
         return supabase.rpc("passages_proches", {"vecteur": vecteur, "nombre": NB_PASSAGES_PAR_CRITERE}).execute().data or []
 
-    resultats = classer(criteres, candidats, villes, chercher_passages, demander_ia)
-    print(f"[RECHERCHE] {len(criteres)} critère(s), {len(candidats)} CV, {len(resultats)} résultat(s)")
-    return {"message": message, "criteres": criteres, "resultats": resultats}
+    resultats, non_verifies = classer(criteres, candidats, villes, chercher_passages, demander_ia)
+    print(f"[RECHERCHE] {len(criteres)} critère(s), {len(candidats)} CV, {len(resultats)} résultat(s), {non_verifies} non vérifié(s)")
+    # Le recruteur est prévenu si l'IA n'a pas pu lire certains CV (service saturé) : rien n'est caché
+    avertissement = (f"{non_verifies} CV n'ont pas pu être vérifiés (service d'IA saturé) : relancez la recherche dans une minute "
+                     "pour des résultats complets.") if non_verifies else None
+    return {"message": message, "criteres": criteres, "resultats": resultats, "avertissement": avertissement}
