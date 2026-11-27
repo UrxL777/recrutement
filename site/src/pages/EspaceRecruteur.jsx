@@ -1,12 +1,12 @@
 // L'espace recruteur, sur une seule page :
 //   1. la barre de recherche : le recruteur écrit ce qu'il cherche, en langage naturel
-//   2. le serveur IA (/rechercher) rend les candidats classés : score, critères avec preuves, résumé
+//   2. le serveur IA (/rechercher) rend les candidats classés : score, critères avec preuves, fiche d'identité
 //   3. « Voir le CV » ouvre le fichier d'origine (lien temporaire)
 //   4. la case « Affiner » : la précision est ajoutée à la conversation, l'agent refait la recherche
 // La conversation est gardée dans le navigateur (sessionStorage), le temps de la visite.
 import { useEffect, useState } from 'react'
 import { appelerServeur, ouvrirCv } from '../supabase'
-import { dureeLisible } from './EspaceCandidat'
+import { dureeLisible, FicheIdentite } from './EspaceCandidat'
 
 const CLE = 'recherche_recrutsmart'
 const ICONES = { trouve: '✅', partiel: '🟡', absent: '⬜' }
@@ -17,6 +17,7 @@ function lireMemoire() {
 }
 
 function CarteCandidat({ r, nbCriteres, onErreur }) {
+  const [ficheOuverte, setFicheOuverte] = useState(false)
   return (
     <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -45,12 +46,15 @@ function CarteCandidat({ r, nbCriteres, onErreur }) {
         ))}
       </ul>
 
-      {r.resume && <p className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-700">{r.resume}</p>}
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <button onClick={() => ouvrirCv(r.chemin_stockage).catch((e) => onErreur(e.message))}
           className="rounded-lg bg-principal px-4 py-2 text-sm font-medium text-white hover:bg-principal-fonce">
           Voir le CV
+        </button>
+        <button onClick={() => setFicheOuverte(!ficheOuverte)}
+          className="rounded-lg border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50">
+          {ficheOuverte ? 'Masquer la fiche' : 'Voir la fiche'}
         </button>
         {r.liens.map((l) => (
           <a key={l.url} href={l.url} target="_blank" rel="noreferrer" className="rounded-full bg-blue-50 px-3 py-1 text-xs text-principal">
@@ -58,6 +62,7 @@ function CarteCandidat({ r, nbCriteres, onErreur }) {
           </a>
         ))}
       </div>
+      {ficheOuverte && <div className="mt-4"><FicheIdentite fiche={r.fiche} profil={{ nom: r.nom, prenom: r.prenom, lieu_residence: r.lieu_residence }} /></div>}
     </article>
   )
 }

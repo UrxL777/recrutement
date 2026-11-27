@@ -115,7 +115,6 @@ create table public.fiches_cv (
   localisation         text,
   -- Le profil
   titre                text,                         -- le métier principal
-  resume               text,                         -- trois phrases courtes : affiché au candidat ET au recruteur
   experiences          jsonb not null default '[]',  -- [{poste, entreprise, debut, fin, periode, duree}]
   annees_experience    numeric(5, 2),                -- calculées par Python à partir des dates (2 décimales : les mois justes)
   liens                jsonb not null default '[]',  -- [{type, url}] : GitHub, portfolio, LinkedIn…
@@ -327,4 +326,7 @@ alter table public.fiches_cv
   drop column if exists certifications,
   drop column if exists projets,
   drop column if exists autres_infos;
+
+-- ─── Migration (27/11/2026) : la fiche d'identité n'a plus de résumé ───
+alter table public.fiches_cv drop column if exists resume;
 
