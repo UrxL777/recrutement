@@ -37,7 +37,7 @@ Règles :
 - N'invente rien et ne devine rien : seulement ce qui est écrit dans le CV. Une information absente vaut null ou une liste vide.
 - N'oublie rien : chaque information utile du CV doit se retrouver dans la fiche (identité, expériences ou rubriques).
 - "nom" : le nom de famille ; "prenom" : tous les prénoms, tels qu'ils sont écrits.
-- "titre" : le métier du candidat, comme sur une offre d'emploi : un nom de métier qui désigne la personne, jamais un statut (étudiant, apprenant, stagiaire), jamais un simple domaine. Si l'intitulé en tête du CV est déjà un métier (il désigne la personne : « chargé de… », « comptable », « développeur… »), garde-le tel quel. S'il commence par un statut ou ne nomme qu'un domaine, le titre s'écrit « nom de métier + domaines » : le nom de métier se forme à partir du mot d'action écrit dans l'intitulé (développement → développeur, analyse → analyste, gestion → gestionnaire, conseil → conseiller…), et non d'après tes propres déductions ; puis viennent tous les domaines de l'intitulé, sans en oublier aucun et sans répéter le mot du métier. Sans intitulé, déduis le métier de l'ensemble du CV.
+- "titre" : l'intitulé écrit en tête du CV (le métier ou le poste que le candidat s'attribue), recopié exactement comme il est écrit, sans rien changer, même s'il te semble mal formulé. Seulement si le CV n'a aucun intitulé, déduis le métier de l'ensemble du CV.
 - "date_naissance" au format AAAA-MM-JJ, seulement si elle est écrite. "age" : un nombre, seulement si l'âge est écrit (« 25 ans »).
 - "experiences" : les emplois et les stages. "debut" et "fin" au format AAAA-MM, ou AAAA si le mois n'est pas écrit ; "fin" vaut "aujourd'hui" pour un poste en cours, null si elle n'est pas écrite. "periode" : la période recopiée telle qu'elle est écrite, ou null.
 - "rubriques" : tout le reste du CV, rangé par sorte d'information, dans cet ordre quand elles existent : formations, diplômes, certifications, projets, compétences, langues, qualités, centres d'intérêt, puis tout ce qui reste (disponibilité, permis, situation familiale, habitudes, religion, et toute autre information). Ne crée une rubrique que si le CV en parle.
@@ -195,24 +195,6 @@ def _dates_lisibles(texte: str) -> str:
     return re.sub(r"\b(\d{4})-(0[1-9]|1[0-2])\b", lambda m: f"{MOIS[int(m.group(2)) - 1]} {m.group(1)}", texte)
 
 
-def _sans_repetition(titre: str | None) -> str | None:
-    """« Développeur Data, IA, développement web » → « Développeur Data, IA, web » (le métier n'est pas répété)."""
-    if not titre or " " not in titre:
-        return titre
-    premier, reste = titre.split(" ", 1)
-    racine = premier.lower()[:6]
-    mots = reste.split(" ")
-    gardes = [m for i, m in enumerate(mots)
-              # le mot répété est retiré, sauf s'il est suivi de « de », « des »… (« analyse de risques » reste entier)
-              if not (m.lower().startswith(racine) and i + 1 < len(mots)
-                      and mots[i + 1].lower() not in ("de", "des", "du", "d'", "en", "et"))]
-    return f"{premier} {' '.join(gardes)}".strip()
-
-
-def _majuscule(texte: str | None) -> str | None:
-    return texte[0].upper() + texte[1:] if texte else texte
-
-
 def _periode(valeur, texte: str) -> str | None:
     """La période telle qu'écrite dans le CV ; retirée si elle n'y est pas (l'IA l'aurait inventée)."""
     periode = _texte(valeur)
@@ -248,7 +230,7 @@ def controler_fiche(brute: dict, texte: str) -> dict:
         "email": email_du_cv(_texte(brute.get("email")), texte),
         "telephone": telephone_du_cv(_texte(brute.get("telephone")), texte),
         "localisation": _texte(brute.get("localisation")),
-        "titre": _sans_repetition(_majuscule(_texte(brute.get("titre")))),
+        "titre": _texte(brute.get("titre")),   # tel qu'écrit dans le CV
         "experiences": experiences,
         "annees_experience": annees_experience(experiences, texte, aujourd_hui),
         "liens": liens_du_cv(texte),
