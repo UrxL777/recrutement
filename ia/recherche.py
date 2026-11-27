@@ -6,7 +6,8 @@ La démarche :
   2. Python vérifie ce qui se calcule : les années d'expérience, l'âge, le lieu de résidence
   3. pour tout le reste (métier, compétence, loisir…) :
        - la recherche par le sens (pgvector) trouve les passages de CV les plus proches de chaque critère
-       - l'IA relit ces passages sur les meilleurs candidats et répond pour chaque critère :
+       - les candidats les plus prometteurs sont choisis : passages proches + mots de la demande écrits dans le CV
+       - l'IA relit le CV entier de ces candidats et répond pour chaque critère :
          trouvé, en partie ou non mentionné, avec la phrase exacte du CV comme preuve
        - Python vérifie que la preuve est bien écrite dans le CV
   4. Python calcule le score : trouvé = 1, en partie = 0,5, non mentionné = 0 (tous les critères comptent pareil)
@@ -19,8 +20,8 @@ from datetime import date
 from analyse import calculer_embeddings
 
 NB_PASSAGES_PAR_CRITERE = 40   # passages proches demandés à la base, pour chaque critère
-PASSAGES_PAR_CANDIDAT = 2      # passages gardés par candidat et par critère, envoyés à l'IA
-NB_CANDIDATS_VERIFIES = 15     # l'IA ne vérifie que les candidats les plus prometteurs
+NB_CANDIDATS_VERIFIES = 20     # l'IA ne vérifie que les candidats les plus prometteurs
+LONGUEUR_MAX_CV = 4000         # caractères du CV envoyés à l'IA pour chaque candidat vérifié
 CANDIDATS_PAR_APPEL = 5        # candidats vérifiés en un seul appel à l'IA
 NB_RESULTATS = 20
 TYPES = ("experience_min", "age_min", "age_max", "lieu", "texte")
@@ -38,10 +39,12 @@ Si une précision retire ou remplace un critère, applique-la.
 Réponds uniquement en JSON : {"criteres": [{"critere": "...", "type": "...", "valeur": null}], "message": "..."}"""
 
 PROMPT_VERIFICATION = """Tu vérifies si des candidats correspondent aux critères d'un recruteur.
-Pour chaque candidat, tu reçois des passages de son CV. Pour chaque critère, réponds :
-- "statut" : "trouve" si un passage montre clairement le critère, "partiel" s'il le montre en partie ou indirectement, "absent" si les passages n'en parlent pas ;
-- "preuve" : la phrase du passage qui justifie ta réponse, recopiée mot pour mot, ou null si le statut est "absent".
-Ne te fie qu'aux passages et n'invente rien.
+Pour chaque candidat, tu reçois le texte de son CV. Pour chaque critère, réponds :
+- "statut" : "trouve" si le CV montre clairement le critère, "partiel" s'il le montre en partie (un métier voisin, un niveau plus faible que demandé, une information qui le laisse seulement supposer), "absent" si le CV n'en parle pas ou dit le contraire ;
+- "preuve" : la phrase du CV qui justifie ta réponse, recopiée mot pour mot, ou null si le statut est "absent".
+Lis le sens exact : une négation (« ne… pas », « pas du tout », « sans ») ou une information opposée contredit le critère, et le statut est alors "absent". Un mot qui ressemble au critère sans avoir le même sens ne compte pas.
+Le recruteur peut chercher n'importe quoi, même une information personnelle ou inhabituelle : réponds seulement d'après ce qui est écrit dans le CV.
+Ne te fie qu'au CV et n'invente rien.
 Réponds uniquement en JSON : {"candidats": [{"cv_id": 0, "criteres": [{"critere": "...", "statut": "...", "preuve": null}]}]}"""
 
 
@@ -181,6 +184,22 @@ def verifier_par_calcul(critere: dict, candidat: dict, villes: dict) -> dict:
     return resultat
 
 
+MOTS_VIDES = {"avec", "dans", "pour", "plus", "moins", "sans", "chez", "une", "des", "les", "qui", "que", "est", "sont",
+              "personne", "quelqu", "quelquun", "candidat", "candidate", "cherche", "veux", "voudrais", "profil", "aime", "fait"}
+
+
+def mots_presents(critere: str, texte_cv: str) -> float:
+    """
+    La part des mots du critère écrits dans le CV (0 à 1), comparés par leur début :
+    « végétarienne » retrouve « végétarien ». Ce n'est qu'une présélection : l'IA vérifie le sens ensuite.
+    """
+    mots = [m for m in re.findall(r"[a-z]{4,}", normaliser(critere)) if m not in MOTS_VIDES]
+    if not mots:
+        return 0.0
+    texte = normaliser(texte_cv)
+    return sum(1 for m in mots if re.search(rf"\b{re.escape(m[:7])}", texte)) / len(mots)
+
+
 # ─── 3. Recherche par le sens, puis vérification par l'IA ─────────────────────
 
 def _liste_de_dicts(valeur, cle: str) -> list:
@@ -193,9 +212,9 @@ def _liste_de_dicts(valeur, cle: str) -> list:
     return [v for v in valeur or [] if isinstance(v, dict)] if isinstance(valeur, list) else []
 
 
-def verifier_par_ia(criteres: list, a_verifier: list, passages: dict, demander_ia) -> dict:
+def verifier_par_ia(criteres: list, a_verifier: list, demander_ia) -> dict:
     """
-    L'IA vérifie les critères « texte » sur les candidats choisis, à partir de leurs passages.
+    L'IA vérifie les critères « texte » sur les candidats choisis, en lisant leur CV entier.
     Rend {cv_id: {critère: {statut, preuve}}}. Une preuve absente du CV est retirée.
     """
     resultats = {}
@@ -205,11 +224,13 @@ def verifier_par_ia(criteres: list, a_verifier: list, passages: dict, demander_i
     while groupes:
         groupe = groupes.pop(0)
         entree = {"criteres": noms, "candidats": [
-            {"cv_id": c["cv_id"], "passages": list(dict.fromkeys(
-                p for nom in noms for p in passages.get(c["cv_id"], {}).get(nom, [])))}
-            for c in groupe]}
-        reponse = demander_ia([{"role": "system", "content": PROMPT_VERIFICATION},
-                               {"role": "user", "content": json.dumps(entree, ensure_ascii=False)}])
+            {"cv_id": c["cv_id"], "cv": c["texte_complet"][:LONGUEUR_MAX_CV]} for c in groupe]}
+        try:
+            reponse = demander_ia([{"role": "system", "content": PROMPT_VERIFICATION},
+                                   {"role": "user", "content": json.dumps(entree, ensure_ascii=False)}])
+        except Exception as erreur:      # une réponse ratée ne fait pas échouer toute la recherche
+            print(f"[RECHERCHE] vérification ratée pour {len(groupe)} candidat(s) : {str(erreur)[:120]}")
+            reponse = {}
         textes_cv = {c["cv_id"]: normaliser(c["texte_complet"]) for c in groupe}
         for r in _liste_de_dicts(reponse.get("candidats"), "cv_id"):
             try:
@@ -248,27 +269,23 @@ def classer(criteres: list, candidats: list, villes: dict, chercher_passages, de
     details = {cv_id: {c["critere"]: verifier_par_calcul(c, cand, villes) for c in calcules}
                for cv_id, cand in par_id.items()}
 
-    # La recherche par le sens, pour chaque critère « texte »
-    passages, proximite = {}, {cv_id: 0.0 for cv_id in par_id}
+    # La présélection, pour chaque critère « texte » : la recherche par le sens (passages proches)
+    # et les mots de la demande écrits tels quels dans le CV
+    proximite = {cv_id: 0.0 for cv_id in par_id}
     if textes:
         for critere, vecteur in zip(textes, calculer_embeddings([c["critere"] for c in textes])):
             meilleure = {}
             for ligne in chercher_passages(vecteur):
-                cv_id = ligne["cv_id"]
-                if cv_id not in par_id:
-                    continue
-                liste = passages.setdefault(cv_id, {}).setdefault(critere["critere"], [])
-                if len(liste) < PASSAGES_PAR_CANDIDAT:
-                    liste.append(ligne["contenu"])
-                meilleure[cv_id] = max(meilleure.get(cv_id, 0.0), float(ligne["similarite"]))
-            for cv_id, sim in meilleure.items():
-                proximite[cv_id] += sim
+                if ligne["cv_id"] in par_id:
+                    meilleure[ligne["cv_id"]] = max(meilleure.get(ligne["cv_id"], 0.0), float(ligne["similarite"]))
+            for cv_id, cand in par_id.items():
+                proximite[cv_id] += meilleure.get(cv_id, 0.0) + mots_presents(critere["critere"], cand["texte_complet"])
 
-        # Les candidats les plus prometteurs : critères calculés remplis + passages les plus proches
+        # Les candidats les plus prometteurs : critères calculés remplis + proximité avec la demande
         def promesse(cv_id):
             return sum(POINTS[d["statut"]] for d in details[cv_id].values()) + proximite[cv_id]
-        a_verifier = sorted((par_id[i] for i in par_id if i in passages), key=lambda c: -promesse(c["cv_id"]))
-        verifies = verifier_par_ia(textes, a_verifier[:NB_CANDIDATS_VERIFIES], passages, demander_ia)
+        a_verifier = sorted(par_id.values(), key=lambda c: -promesse(c["cv_id"]))
+        verifies = verifier_par_ia(textes, a_verifier[:NB_CANDIDATS_VERIFIES], demander_ia)
         for cv_id in details:
             for c in textes:
                 v = verifies.get(cv_id, {}).get(c["critere"], {"statut": "absent", "preuve": None})

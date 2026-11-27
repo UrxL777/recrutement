@@ -81,7 +81,7 @@ async function texteDocx(contenu) {
 // Retire les puces, les emojis et les symboles décoratifs, et les espaces en trop ; garde une information par ligne
 export function nettoyerTexte(texte) {
   return texte
-    .replace(/[•▪●■□◆◇○◦➢➤►▶✓✔☐☑★☆→⇒➔✦✧❖]/g, ' ')
+    .replace(/[•▪●■□◆◇○◦‣▸▹➢➤►▶✓✔☐☑★☆→⇒➔✦✧❖]/g, ' ')
     .replace(/\p{Extended_Pictographic}\uFE0F?/gu, ' ')     // les emojis (📍 📞 ✉️…)
     .split('\n')
     .map((ligne) => ligne.replace(/[ \t ]+/g, ' ').trim())

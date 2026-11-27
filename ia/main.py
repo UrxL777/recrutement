@@ -33,7 +33,7 @@ MODELE_SECOURS = "qwen/qwen3.8-27b"     # prend le relais si le quota du princip
 def demander_ia(messages: list, max_tokens: int = 4000, modele: str = MODELE) -> dict:
     """Envoie une demande à l'IA et rend sa réponse en JSON. Passe au modèle de secours si besoin."""
     principal = modele
-    for modele in (principal, MODELE_SECOURS):
+    for modele in (principal, principal, MODELE_SECOURS):   # le modèle principal a droit à un second essai
         try:
             reponse = groq.chat.completions.create(
                 model=modele,
@@ -47,8 +47,9 @@ def demander_ia(messages: list, max_tokens: int = 4000, modele: str = MODELE) ->
         except Exception as erreur:
             message = str(erreur).lower()
             quota = any(m in message for m in ("429", "413", "503", "rate limit", "over capacity"))
-            if modele == principal and quota:
-                print(f"[IA] Modèle principal indisponible → modèle de secours ({str(erreur)[:100]})")
+            json_rate = isinstance(erreur, json.JSONDecodeError) or "validate json" in message
+            if modele == principal and (quota or json_rate):
+                print(f"[IA] Réponse inutilisable ou quota atteint → nouvel essai ({str(erreur)[:100]})")
                 continue
             raise
 
