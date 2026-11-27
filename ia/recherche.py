@@ -20,19 +20,20 @@ from datetime import date
 from analyse import calculer_embeddings
 
 NB_PASSAGES_PAR_CRITERE = 40   # passages proches demandés à la base, pour chaque critère
-NB_CANDIDATS_VERIFIES = 20     # l'IA ne vérifie que les candidats les plus prometteurs
+NB_CANDIDATS_VERIFIES = 40     # l'IA lit en entier le CV des candidats les plus prometteurs
 LONGUEUR_MAX_CV = 4000         # caractères du CV envoyés à l'IA pour chaque candidat vérifié
 CANDIDATS_PAR_APPEL = 5        # candidats vérifiés en un seul appel à l'IA
 NB_RESULTATS = 20
-TYPES = ("experience_min", "age_min", "age_max", "lieu", "texte")
+TYPES = ("experience_min", "age_min", "age_max", "lieu", "metier", "texte")
+TYPES_LUS = ("metier", "texte")   # les critères vérifiés par l'IA dans le texte du CV
 POINTS = {"trouve": 1.0, "partiel": 0.5, "absent": 0.0}
 
 PROMPT_CRITERES = """Tu aides un recruteur à trouver des candidats dans une base de CV.
 Tu reçois sa demande, puis éventuellement ses précisions successives : la dernière est la plus récente.
 Écris la liste complète et à jour des critères recherchés : un critère par idée, sans en oublier et sans en inventer.
 Pour chaque critère, donne :
-- "critere" : le critère en quelques mots, en français courant, tel que le recruteur l'entend (jamais le nom du type) ;
-- "type" : "experience_min" (un nombre minimum d'années d'expérience), "age_min" (un âge minimum), "age_max" (un âge maximum), "lieu" (l'endroit où vit le candidat) ou "texte" (tout le reste : métier, compétence, outil, diplôme, langue, loisir, habitude, qualité…) ;
+- "critere" : le critère en quelques mots, en français courant, avec les mots exacts du recruteur (« dealer », « chieur », « végétarienne »…) : jamais une simple catégorie comme « métier » ou « loisir », jamais le nom du type ;
+- "type" : "experience_min" (un nombre minimum d'années d'expérience), "age_min" (un âge minimum), "age_max" (un âge maximum), "lieu" (l'endroit où vit le candidat) "metier" (le métier ou le poste recherché) ou "texte" (tout le reste : compétence, outil, diplôme, langue, loisir, habitude, qualité, religion, alimentation…) ;
 - "valeur" : le nombre pour experience_min, age_min et age_max ; la liste des lieux acceptés pour lieu ; null pour texte.
 Si une précision retire ou remplace un critère, applique-la.
 Écris aussi "message" : une phrase courte qui dit au recruteur ce que tu vas rechercher.
@@ -40,7 +41,8 @@ Réponds uniquement en JSON : {"criteres": [{"critere": "...", "type": "...", "v
 
 PROMPT_VERIFICATION = """Tu vérifies si des candidats correspondent aux critères d'un recruteur.
 Pour chaque candidat, tu reçois le texte de son CV. Pour chaque critère, réponds :
-- "statut" : "trouve" si le CV montre clairement le critère, "partiel" s'il le montre en partie (un métier voisin, un niveau plus faible que demandé, une information qui le laisse seulement supposer), "absent" si le CV n'en parle pas ou dit le contraire ;
+- "statut" : "trouve" si le CV dit ce que le critère demande, même avec une nuance (« un peu », « parfois ») ; "partiel" seulement pour un niveau plus faible que demandé (une langue en notions quand on demande « courant ») ou une information qui le laisse supposer sans le dire ; "absent" si le CV n'en parle pas, dit le contraire, ou parle d'autre chose ;
+Sois strict : le recruteur veut exactement ce qu'il demande. Un métier voisin ou du même domaine n'est pas le métier demandé (une aide-soignante n'est pas une infirmière) : "absent".
 - "preuve" : la phrase du CV qui justifie ta réponse, recopiée mot pour mot, ou null si le statut est "absent".
 Lis le sens exact : une négation (« ne… pas », « pas du tout », « sans ») ou une information opposée contredit le critère, et le statut est alors "absent". Un mot qui ressemble au critère sans avoir le même sens ne compte pas.
 Le recruteur peut chercher n'importe quoi, même une information personnelle ou inhabituelle : réponds seulement d'après ce qui est écrit dans le CV.
@@ -64,6 +66,13 @@ def decouper_criteres(messages: list, demander_ia) -> tuple:
     )
     reponse = demander_ia([{"role": "system", "content": PROMPT_CRITERES}, {"role": "user", "content": texte}],
                           max_tokens=2000)
+    # Un critère « lu » qui ne reprend aucun mot du recruteur a perdu ce qu'il cherchait (« métier » au lieu de « dealer »)
+    perdus = [str(c.get("critere")) for c in reponse.get("criteres") or [] if isinstance(c, dict)
+              and c.get("type") in TYPES_LUS and not _mots_communs(str(c.get("critere") or ""), texte)]
+    if perdus:
+        rappel = f"Attention : {', '.join(perdus)} ne reprend aucun mot du recruteur. Chaque critère doit garder ses mots exacts."
+        reponse = demander_ia([{"role": "system", "content": PROMPT_CRITERES + "\n" + rappel},
+                               {"role": "user", "content": texte}], max_tokens=2000)
     criteres = []
     for c in reponse.get("criteres") or []:
         if not isinstance(c, dict) or not str(c.get("critere") or "").strip():
@@ -82,6 +91,8 @@ def decouper_criteres(messages: list, demander_ia) -> tuple:
         else:
             valeur = None
         nom = str(c["critere"]).strip()
+        if type_critere in TYPES_LUS and not _mots_communs(nom, texte):
+            nom = messages[-1].strip()      # toujours perdu : on cherche avec les mots mêmes du recruteur
         # Expérience et âge : toujours un nom précis (« Au moins 2 ans d'expérience ») ;
         # lieu : le nom de l'IA, sauf si elle a recopié le nom du type
         if type_critere in ("experience_min", "age_min", "age_max") \
@@ -89,6 +100,12 @@ def decouper_criteres(messages: list, demander_ia) -> tuple:
             nom = nom_lisible(type_critere, valeur) or nom
         criteres.append({"critere": nom, "type": type_critere, "valeur": valeur})
     return criteres, str(reponse.get("message") or "").strip()
+
+
+def _mots_communs(critere: str, demande: str) -> bool:
+    """Le critère reprend-il au moins un mot de la demande (comparés par leur début) ?"""
+    demande = normaliser(demande)
+    return any(re.search(rf"\b{re.escape(m[:5])}", demande) for m in re.findall(r"[a-z]{3,}", normaliser(critere)))
 
 
 def nom_lisible(type_critere: str, valeur) -> str | None:
@@ -262,8 +279,8 @@ def classer(criteres: list, candidats: list, villes: dict, chercher_passages, de
     chercher_passages(vecteur) → [{cv_id, contenu, similarite}] : la recherche par le sens dans la base.
     """
     par_id = {c["cv_id"]: c for c in candidats}
-    calcules = [c for c in criteres if c["type"] != "texte"]
-    textes = [c for c in criteres if c["type"] == "texte"]
+    calcules = [c for c in criteres if c["type"] not in TYPES_LUS]
+    textes = [c for c in criteres if c["type"] in TYPES_LUS]
 
     # Les critères calculés, pour tous les candidats
     details = {cv_id: {c["critere"]: verifier_par_calcul(c, cand, villes) for c in calcules}
@@ -314,10 +331,15 @@ def classer(criteres: list, candidats: list, villes: dict, chercher_passages, de
             "valide_par_candidat": fiche.get("valide_par_candidat", False),
             "chemin_stockage": cand["chemin_stockage"],
             "score": round(100 * points / len(criteres)),
+            # pour départager les scores égaux : d'abord le métier, puis le lieu, puis le reste
+            "ordre": (sum(POINTS[d["statut"]] for d, c in zip(detail, criteres) if c["type"] == "metier"),
+                      sum(POINTS[d["statut"]] for d, c in zip(detail, criteres) if c["type"] == "lieu")),
             "nb_trouves": sum(1 for d in detail if d["statut"] == "trouve"),
             "criteres": detail,
         })
-    resultats.sort(key=lambda r: (-r["score"], -r["nb_trouves"]))
+    resultats.sort(key=lambda r: (-r["score"], -r["ordre"][0], -r["ordre"][1], -r["nb_trouves"]))
+    for r in resultats:
+        del r["ordre"]
     return resultats[:NB_RESULTATS]
 
 
