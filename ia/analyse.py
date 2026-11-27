@@ -3,7 +3,7 @@ RecrutSmart : l'analyse d'un CV, en deux temps. Rien n'est enregistré tant que 
 
 1. PRÉPARER (route /preparer-cv) : rien n'est écrit en base
      - le site a extrait le texte du CV (JavaScript) et l'envoie
-     - l'IA lit le texte brut et range tout ce qu'il contient : identité, métier, résumé, expériences,
+     - l'IA lit le texte brut et range tout ce qu'il contient : identité, métier, expériences,
        puis une rubrique par sorte d'information (formations, projets, compétences… selon le CV)
      - Python vérifie ce qui doit être exact : liens, e-mail, téléphone, dates, âge ; il CALCULE les années d'expérience
      - la fiche est rendue au site, qui l'affiche au candidat : s'il n'est pas d'accord, il redépose son CV
@@ -29,6 +29,7 @@ TAILLE_PASSAGE = 500          # nombre de caractères visé pour chaque passage
 
 PROMPT_FICHE = """Tu lis le texte brut d'un CV, extrait d'un fichier PDF ou Word. La mise en page est perdue : les colonnes se suivent, et des éléments écrits à droite ou en petit (dates, outils) peuvent être regroupés ailleurs dans le texte, souvent au début.
 Les dates regroupées à part appartiennent, dans l'ordre où elles apparaissent, aux expériences puis aux formations, dans l'ordre où celles-ci apparaissent : rattache chaque date à son élément d'après cet ordre et le sens (une date « en cours » va à un élément en cours).
+Le titre d'une partie peut être séparé de son contenu : une liste de mots isolés, souvent à la fin du texte (qualités, atouts, loisirs…), appartient à la partie dont le titre est resté vide plus haut ; ne la laisse pas de côté.
 Chaque CV est écrit différemment : comprends chaque partie d'après son contenu, quel que soit son titre (« domaine », « métier », « atouts », « savoir-être »…).
 Écris tout en français.
 
@@ -36,19 +37,18 @@ Règles :
 - N'invente rien et ne devine rien : seulement ce qui est écrit dans le CV. Une information absente vaut null ou une liste vide.
 - N'oublie rien : chaque information utile du CV doit se retrouver dans la fiche (identité, expériences ou rubriques).
 - "nom" : le nom de famille ; "prenom" : tous les prénoms, tels qu'ils sont écrits.
-- "titre" : le métier du candidat, comme sur une offre d'emploi : un nom de métier qui désigne la personne, jamais un statut (étudiant, apprenant, stagiaire), jamais un simple domaine. S'il y a un intitulé en tête du CV, le titre s'écrit « nom de métier + domaines » : le nom de métier se forme à partir du mot d'action écrit dans l'intitulé (développement → développeur, analyse → analyste, gestion → gestionnaire, conseil → conseiller…), et non d'après tes propres déductions ; puis viennent tous les domaines de l'intitulé, sans en oublier aucun. Sans intitulé, déduis le métier de l'ensemble du CV.
+- "titre" : le métier du candidat, comme sur une offre d'emploi : un nom de métier qui désigne la personne, jamais un statut (étudiant, apprenant, stagiaire), jamais un simple domaine. S'il y a un intitulé en tête du CV, le titre s'écrit « nom de métier + domaines » : le nom de métier se forme à partir du mot d'action écrit dans l'intitulé (développement → développeur, analyse → analyste, gestion → gestionnaire, conseil → conseiller…), et non d'après tes propres déductions ; puis viennent tous les domaines de l'intitulé, sans en oublier aucun et sans répéter le mot du métier. Sans intitulé, déduis le métier de l'ensemble du CV.
 - "date_naissance" au format AAAA-MM-JJ, seulement si elle est écrite. "age" : un nombre, seulement si l'âge est écrit (« 25 ans »).
-- "resume" : trois phrases courtes et complètes au plus, 50 mots au plus en tout, rédigées par toi à la troisième personne : le métier (celui de "titre"), l'expérience, la formation principale et les points forts. Ne coupe jamais une phrase. Ne recopie pas le paragraphe de présentation du CV. Chaque affirmation doit être exacte : une formation « en cours » est suivie, pas obtenue (jamais « titulaire » ni « diplômé ») ; une formation dont la date de fin est passée est terminée (jamais « suit actuellement »).
 - "experiences" : les emplois et les stages. "debut" et "fin" au format AAAA-MM, ou AAAA si le mois n'est pas écrit ; "fin" vaut "aujourd'hui" pour un poste en cours, null si elle n'est pas écrite. "periode" : la période recopiée telle qu'elle est écrite, ou null.
 - "rubriques" : tout le reste du CV, rangé par sorte d'information, dans cet ordre quand elles existent : formations, diplômes, certifications, projets, compétences, langues, qualités, centres d'intérêt, puis tout ce qui reste (disponibilité, permis, situation familiale, habitudes, religion, et toute autre information). Ne crée une rubrique que si le CV en parle.
   "titre" : le nom court de la rubrique (« Formations », « Projets », « Compétences »…).
-  "contenu" : une seule ligne, tous les éléments de la rubrique séparés par des virgules, chacun en quelques mots, avec la précision utile entre parenthèses (école, organisme, année ou « en cours », niveau, outil).
+  "contenu" : une seule ligne, tous les éléments de la rubrique séparés par des virgules, chacun en quelques mots, avec la précision utile entre parenthèses (école, organisme, dates écrites comme dans le CV ou « en cours », niveau, outil).
   La rubrique « Compétences » rassemble tous les langages, outils, logiciels et savoir-faire cités n'importe où dans le CV (y compris dans les expériences et les projets), chacun une seule fois.
   Ne mets pas dans les rubriques le nom, le métier, le contact, les liens ni les expériences : ils ont déjà leur place.
 
 Réponds uniquement en JSON :
 {"nom": texte ou null, "prenom": texte ou null, "date_naissance": texte ou null, "age": nombre ou null,
- "email": texte ou null, "telephone": texte ou null, "localisation": texte ou null, "titre": texte ou null, "resume": texte,
+ "email": texte ou null, "telephone": texte ou null, "localisation": texte ou null, "titre": texte ou null,
  "experiences": [{"poste": texte, "entreprise": texte ou null, "debut": texte ou null, "fin": texte ou null, "periode": texte ou null}],
  "rubriques": [{"titre": texte, "contenu": texte}]}"""
 
@@ -187,6 +187,28 @@ def _prenom(valeur) -> str | None:
     return prenom.title() if prenom and prenom.isupper() else prenom
 
 
+MOIS = ["janv.", "fév.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+
+
+def _dates_lisibles(texte: str) -> str:
+    """« 2025-02 » → « fév. 2025 » (une date au format technique n'est pas affichée telle quelle)."""
+    return re.sub(r"\b(\d{4})-(0[1-9]|1[0-2])\b", lambda m: f"{MOIS[int(m.group(2)) - 1]} {m.group(1)}", texte)
+
+
+def _sans_repetition(titre: str | None) -> str | None:
+    """« Développeur Data, IA, développement web » → « Développeur Data, IA, web » (le métier n'est pas répété)."""
+    if not titre or " " not in titre:
+        return titre
+    premier, reste = titre.split(" ", 1)
+    racine = premier.lower()[:6]
+    mots = reste.split(" ")
+    gardes = [m for i, m in enumerate(mots)
+              # le mot répété est retiré, sauf s'il est suivi de « de », « des »… (« analyse de risques » reste entier)
+              if not (m.lower().startswith(racine) and i + 1 < len(mots)
+                      and mots[i + 1].lower() not in ("de", "des", "du", "d'", "en", "et"))]
+    return f"{premier} {' '.join(gardes)}".strip()
+
+
 def _majuscule(texte: str | None) -> str | None:
     return texte[0].upper() + texte[1:] if texte else texte
 
@@ -215,7 +237,7 @@ def controler_fiche(brute: dict, texte: str) -> dict:
     rubriques = []
     for r in brute.get("rubriques") or []:
         if isinstance(r, dict) and _texte(r.get("titre")) and _texte(r.get("contenu")):
-            rubriques.append({"titre": _texte(r.get("titre")), "contenu": _texte(r.get("contenu"))})
+            rubriques.append({"titre": _texte(r.get("titre")), "contenu": _dates_lisibles(_texte(r.get("contenu")))})
     date_naissance = date_naissance_du_cv(brute.get("date_naissance"), texte)
     return {
         "nom": _texte(brute.get("nom")),
@@ -226,8 +248,7 @@ def controler_fiche(brute: dict, texte: str) -> dict:
         "email": email_du_cv(_texte(brute.get("email")), texte),
         "telephone": telephone_du_cv(_texte(brute.get("telephone")), texte),
         "localisation": _texte(brute.get("localisation")),
-        "titre": _majuscule(_texte(brute.get("titre"))),
-        "resume": _texte(brute.get("resume")) or "",
+        "titre": _sans_repetition(_majuscule(_texte(brute.get("titre")))),
         "experiences": experiences,
         "annees_experience": annees_experience(experiences, texte, aujourd_hui),
         "liens": liens_du_cv(texte),
